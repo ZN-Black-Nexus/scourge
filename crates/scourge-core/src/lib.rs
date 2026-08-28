@@ -54,6 +54,18 @@ pub enum Action {
     Wield(usize),
     /// Empties your hands, returning the wielded item to inventory.
     Unwield,
+    /// Passes the turn without doing anything else - real DDA's `|`.
+    Wait,
+    /// UI-only, same pattern as `OpenWieldMenu`: opens the drop-selection
+    /// screen. 'd' on vi (real DDA), 'p' ("put down") on wasd since 'd' is
+    /// movement there.
+    OpenDropMenu,
+    /// Drops inventory item at this index onto the player's current tile.
+    Drop(usize),
+    /// UI-only: shows a description of the player's own current tile - a
+    /// quick, cursor-free version of the free-roam 'x' look. 'e' on vi
+    /// (real DDA), 'l' ("look") on wasd since 'e' is movement there.
+    OpenExamine,
 }
 
 /// Backend-agnostic terrain color name. `scourge-core` has no rendering
@@ -485,6 +497,17 @@ impl World {
                     self.turn += 1;
                 }
             }
+            Action::Wait => self.turn += 1,
+            // Never actually reaches here in normal play - the render layer
+            // intercepts these to open UI screens instead.
+            Action::OpenDropMenu | Action::OpenExamine => {}
+            Action::Drop(index) => {
+                if index < self.player.inventory.len() {
+                    let item = self.player.inventory.remove(index);
+                    self.place_item(self.player.pos.x, self.player.pos.y, item);
+                    self.turn += 1;
+                }
+            }
         }
         true
     }
@@ -536,6 +559,34 @@ mod tests {
         assert_eq!(world.player.wielded, None);
         assert!(world.player.inventory.contains(&item("Stick")));
         assert_eq!(world.turn, 3);
+    }
+
+    #[test]
+    fn waiting_costs_a_turn_and_nothing_else() {
+        let map = Map::new(3, 3, Tile::Floor);
+        let mut world = World::new(map);
+        let pos_before = world.player.pos;
+
+        assert!(world.step(Action::Wait));
+        assert_eq!(world.player.pos, pos_before);
+        assert_eq!(world.turn, 1);
+    }
+
+    #[test]
+    fn dropping_places_the_item_on_the_players_own_tile() {
+        let map = Map::new(3, 3, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 1, y: 1 };
+        world.player.inventory = vec![item("Rock"), item("Stick")];
+
+        world.step(Action::Drop(0));
+        assert_eq!(world.player.inventory, vec![item("Stick")], "only the dropped item leaves inventory");
+        assert_eq!(world.items_at(1, 1), &[item("Rock")]);
+        assert_eq!(world.turn, 1);
+
+        // Dropping with an out-of-range index is a harmless no-op.
+        world.step(Action::Drop(99));
+        assert_eq!(world.turn, 1);
     }
 
     #[test]

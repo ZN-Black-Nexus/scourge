@@ -157,11 +157,16 @@ fn handle_key(
             } else if code == KeyCode::Char('i') {
                 *screen = Screen::Inventory;
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
-                if action == Action::OpenWieldMenu {
-                    // UI-only - never reaches world.step, just switches screens.
-                    *screen = Screen::WieldSelect;
-                } else if !world.step(action) {
-                    return false;
+                match action {
+                    // UI-only - never reach world.step, just switch screens.
+                    Action::OpenWieldMenu => *screen = Screen::WieldSelect,
+                    Action::OpenDropMenu => *screen = Screen::DropSelect,
+                    Action::OpenExamine => *screen = Screen::Examine,
+                    _ => {
+                        if !world.step(action) {
+                            return false;
+                        }
+                    }
                 }
             }
         }
@@ -169,6 +174,10 @@ fn handle_key(
             if code == KeyCode::Esc {
                 *screen = Screen::Game;
             }
+        }
+        Screen::Examine => {
+            // Dismissed by any key, matching DDA's message-prompt feel.
+            *screen = Screen::Game;
         }
         Screen::WieldSelect => {
             if code == KeyCode::Esc {
@@ -181,6 +190,19 @@ fn handle_key(
                     let index = (c as u8 - b'a') as usize;
                     if index < world.player.inventory.len() {
                         world.step(Action::Wield(index));
+                        *screen = Screen::Game;
+                    }
+                }
+            }
+        }
+        Screen::DropSelect => {
+            if code == KeyCode::Esc {
+                *screen = Screen::Game;
+            } else if let KeyCode::Char(c) = code {
+                if c.is_ascii_lowercase() {
+                    let index = (c as u8 - b'a') as usize;
+                    if index < world.player.inventory.len() {
+                        world.step(Action::Drop(index));
                         *screen = Screen::Game;
                     }
                 }

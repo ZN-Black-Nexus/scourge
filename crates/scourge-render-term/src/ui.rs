@@ -40,6 +40,11 @@ pub enum Screen {
     /// 'w'/'h' (preset-dependent): pick an inventory letter to wield, or
     /// '-' to empty your hands.
     WieldSelect,
+    /// 'd'/'p': pick an inventory letter to drop onto the player's tile.
+    DropSelect,
+    /// 'e'/'l': a quick, cursor-free description of the player's own tile -
+    /// dismissed by any key.
+    Examine,
     /// Free-look cursor: uses your character's real current sight (not
     /// memory-only like the map screen), lets you inspect anything within
     /// it even off the normal viewport, without moving or costing a turn.
@@ -73,6 +78,8 @@ pub fn draw(
         Screen::Game | Screen::Look { .. } | Screen::Map { .. } => {}
         Screen::Inventory => draw_inventory(frame, world),
         Screen::WieldSelect => draw_wield_select(frame, world),
+        Screen::DropSelect => draw_drop_select(frame, world),
+        Screen::Examine => draw_examine(frame, world, explored, visible),
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
@@ -410,6 +417,26 @@ fn draw_wield_select(frame: &mut Frame, world: &World) {
     let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
+}
+
+fn draw_drop_select(frame: &mut Frame, world: &World) {
+    let popup = centered_rect(70, 70, frame.area());
+    let title = "Drop what? (letter to pick, Esc to cancel)";
+    let list = List::new(inventory_letters(&world.player.inventory))
+        .block(Block::default().title(title).borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
+/// 'e'/'l': a quick, cursor-free look at the player's own tile - reuses the
+/// same description logic as the free-roam 'x' look.
+fn draw_examine(frame: &mut Frame, world: &World, explored: &Explored, visible: &VisibleSet) {
+    let popup = centered_rect(60, 20, frame.area());
+    let what = describe_tile(world, explored, visible, world.player.pos.x, world.player.pos.y);
+    let text = format!("You see: {what}\n\n(press any key to close)");
+    let paragraph = Paragraph::new(text).block(Block::default().title("Examine").borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(paragraph, popup);
 }
 
 fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {

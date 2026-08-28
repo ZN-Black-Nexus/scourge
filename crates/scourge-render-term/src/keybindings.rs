@@ -45,11 +45,13 @@ impl KeyBindings {
             (KeyCode::Char('b'), SouthWest),
             (KeyCode::Char('n'), SouthEast),
         ];
-        // 'c' (close) and 'w' (wield) are real DDA's own bindings - free
-        // here since vi movement never touches either.
+        // 'c' (close), 'w' (wield), 'd' (drop), 'e' (examine) are all real
+        // DDA's own bindings - free here since vi movement never touches any of them.
         let mut kb = Self::from_pairs(&pairs);
         kb.bindings.insert(KeyCode::Char('c'), Action::Close);
         kb.bindings.insert(KeyCode::Char('w'), Action::OpenWieldMenu);
+        kb.bindings.insert(KeyCode::Char('d'), Action::OpenDropMenu);
+        kb.bindings.insert(KeyCode::Char('e'), Action::OpenExamine);
         kb
     }
 
@@ -67,23 +69,26 @@ impl KeyBindings {
             (KeyCode::Char('z'), SouthWest),
             (KeyCode::Char('c'), SouthEast),
         ];
-        // 'c' and 'w' are both taken by movement here, so close and wield
-        // use synonyms instead on wasd's free letters (see KEYBINDS.md):
-        // "bar" the door, "hold" an item.
+        // 'c', 'w', 'd', 'e' are all taken by movement here, so each uses a
+        // synonym on one of wasd's free letters instead (see KEYBINDS.md):
+        // "bar" the door, "hold" an item, "put down" an item, "look" closely.
         let mut kb = Self::from_pairs(&pairs);
         kb.bindings.insert(KeyCode::Char('b'), Action::Close);
         kb.bindings.insert(KeyCode::Char('h'), Action::OpenWieldMenu);
+        kb.bindings.insert(KeyCode::Char('p'), Action::OpenDropMenu);
+        kb.bindings.insert(KeyCode::Char('l'), Action::OpenExamine);
         kb
     }
 
     fn from_pairs(pairs: &[(KeyCode, Direction)]) -> Self {
         let mut bindings: HashMap<KeyCode, Action> =
             pairs.iter().map(|(k, d)| (*k, Action::Move(*d))).collect();
-        // 'o' (open) and 'g' (get/pick up) are shared by both presets -
-        // neither is a letter either movement scheme uses, and both match
-        // real DDA's own bindings.
+        // 'o' (open), 'g' (get/pick up), and '|' (wait) are shared by both
+        // presets - none are letters either movement scheme uses, and all
+        // three match real DDA's own bindings.
         bindings.insert(KeyCode::Char('o'), Action::Open);
         bindings.insert(KeyCode::Char('g'), Action::PickUp);
+        bindings.insert(KeyCode::Char('|'), Action::Wait);
         KeyBindings { bindings }
     }
 

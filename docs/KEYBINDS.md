@@ -46,11 +46,16 @@ its most-used action keys.
   on a free letter, keeping DDA's same-letter-shift-pair convention:
   - **wield -> "hold": `h`** — implemented. Vi preset keeps DDA's real `w`.
     Wear (as a separate action from wield) not built yet.
-  - apply -> **use**: `u`
+  - apply -> **use**: `u` — reserved, not implemented (no use-effects
+    system yet, nothing for "apply" to actually do).
   - **close -> "bar" (as in bar the door): `b`** — implemented. Vi preset
     keeps DDA's real `c`.
-  - drop, examine: still open - land wherever's mnemonic once those
-    systems actually exist (no rush, nothing to bind them to yet).
+  - **drop -> "put down": `p`** — implemented. Vi preset keeps DDA's real `d`.
+  - **examine -> "look": `l`** — implemented. Vi preset keeps DDA's real `e`.
+    A quick cursor-free "what's on my own tile" query, distinct from the
+    free-roam `x` look-around.
+- **`|` (wait)** is shared by both presets too, like `o`/`g` - real DDA key,
+  not used by either movement scheme. Just passes the turn.
 - This is a *default*, not a constraint - full custom rebinding already
   exists (`scourge-render-term`'s Settings screen), so a player can always
   override any of this.
