@@ -15,7 +15,7 @@ use ratatui::Terminal;
 
 use keybindings::{arrow_action, KeyBindings, DIRECTIONS};
 use scourge_core::World;
-use scourge_render::Camera;
+use scourge_render::{Camera, Explored};
 use ui::Screen;
 
 /// Restores the terminal on drop, including on panic, so a crash doesn't leave the user's shell broken.
@@ -55,11 +55,12 @@ pub fn run(mut world: World) -> io::Result<()> {
     let config_path = PathBuf::from("config/keybindings.json");
     let mut binds = KeyBindings::load(&config_path).unwrap_or_else(|_| KeyBindings::preset_vi());
     let mut camera = Camera::new();
+    let mut explored = Explored::new(world.map.width, world.map.height);
 
     let mut screen = Screen::Game;
 
     loop {
-        terminal.draw(|frame| ui::draw(frame, &world, &screen, &binds, &mut camera))?;
+        terminal.draw(|frame| ui::draw(frame, &world, &screen, &binds, &mut camera, &mut explored))?;
 
         match event::read()? {
             // The map is a fixed persistent world now, not regenerated per
@@ -90,10 +91,17 @@ fn handle_key(
         Screen::Game => {
             if code == KeyCode::Esc {
                 *screen = Screen::Pause { selected: 0 };
+            } else if code == KeyCode::Char('m') {
+                *screen = Screen::Map;
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 if !world.step(action) {
                     return false;
                 }
+            }
+        }
+        Screen::Map => {
+            if code == KeyCode::Esc {
+                *screen = Screen::Game;
             }
         }
         Screen::Pause { selected } => match code {

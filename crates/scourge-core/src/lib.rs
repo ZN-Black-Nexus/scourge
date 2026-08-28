@@ -37,22 +37,24 @@ pub enum Action {
     Quit,
 }
 
-/// A single terrain type. More kinds (doors, rubble, water...) land here as they're needed.
+/// A single terrain type. More kinds (rubble, water...) land here as they're needed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tile {
     Floor,
     Wall,
+    Door,
 }
 
 impl Tile {
     pub fn is_walkable(self) -> bool {
-        matches!(self, Tile::Floor)
+        matches!(self, Tile::Floor | Tile::Door)
     }
 
     pub fn glyph(self) -> char {
         match self {
             Tile::Floor => '.',
             Tile::Wall => '#',
+            Tile::Door => '+',
         }
     }
 }

@@ -4,18 +4,18 @@
 
 use ratatui::layout::{Constraint, Direction as LayoutDirection, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use scourge_core::{Direction, Tile, World};
-use scourge_render::Camera;
+use scourge_core::{Direction, Pos, Tile, World};
+use scourge_render::{within_radius, Camera, Explored};
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
 
-/// DDA-style scroll deadzone: the camera only shifts once the player gets
-/// this close to the current viewport's edge.
-const SCROLL_MARGIN: i32 = 5;
+/// How far the player can currently see. Doesn't yet account for light
+/// level, perception, or walls blocking line of sight - just distance.
+const SIGHT_RADIUS: i32 = 10;
 
 pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
 pub const SETTINGS_ITEMS: [&str; 3] = [
@@ -26,16 +26,27 @@ pub const SETTINGS_ITEMS: [&str; 3] = [
 
 pub enum Screen {
     Game,
+    Map,
     Pause { selected: usize },
     Settings { selected: usize },
     CustomBinds { selected: usize },
     AwaitingKey { direction: Direction },
 }
 
-pub fn draw(frame: &mut Frame, world: &World, screen: &Screen, binds: &KeyBindings, camera: &mut Camera) {
-    draw_game(frame, world, camera);
+pub fn draw(
+    frame: &mut Frame,
+    world: &World,
+    screen: &Screen,
+    binds: &KeyBindings,
+    camera: &mut Camera,
+    explored: &mut Explored,
+) {
     match screen {
-        Screen::Game => {}
+        Screen::Map => draw_map_screen(frame, world, explored),
+        _ => draw_game(frame, world, camera, explored),
+    }
+    match screen {
+        Screen::Game | Screen::Map => {}
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
@@ -43,34 +54,100 @@ pub fn draw(frame: &mut Frame, world: &World, screen: &Screen, binds: &KeyBindin
     }
 }
 
-fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera) {
+/// One visible cell: its glyph, and whether it's in current view (full
+/// brightness) or only remembered (dimmed).
+fn cell(world: &World, explored: &Explored, x: i32, y: i32) -> (char, bool) {
+    if x == world.player.pos.x && y == world.player.pos.y {
+        return ('@', true);
+    }
+    let visible = within_radius(Pos { x, y }, world.player.pos, SIGHT_RADIUS);
+    if visible {
+        (world.map.tile(x, y).map(Tile::glyph).unwrap_or(' '), true)
+    } else if explored.is_seen(x, y) {
+        (world.map.tile(x, y).map(Tile::glyph).unwrap_or(' '), false)
+    } else {
+        (' ', false)
+    }
+}
+
+/// Builds one row as styled spans, grouping consecutive same-style cells so
+/// a normal move only touches a handful of runs, not one span per character.
+fn build_row(cells: impl Iterator<Item = (char, bool)>) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_visible = true;
+    for (ch, visible) in cells {
+        if current.is_empty() {
+            current_visible = visible;
+        } else if visible != current_visible {
+            spans.push(span_for(std::mem::take(&mut current), current_visible));
+            current_visible = visible;
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        spans.push(span_for(current, current_visible));
+    }
+    Line::from(spans)
+}
+
+fn span_for(text: String, visible: bool) -> Span<'static> {
+    if visible {
+        Span::raw(text)
+    } else {
+        Span::styled(text, Style::default().add_modifier(Modifier::DIM))
+    }
+}
+
+fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &mut Explored) {
     let area = frame.area();
     let map_height = area.height.saturating_sub(1);
     let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
 
-    camera.update(
-        world.player.pos,
-        viewport_w,
-        viewport_h,
-        world.map.width,
-        world.map.height,
-        SCROLL_MARGIN,
-    );
+    camera.center_on(world.player.pos, viewport_w, viewport_h, world.map.width, world.map.height);
+    explored.reveal(world.player.pos, SIGHT_RADIUS);
 
     let lines: Vec<Line> = (0..viewport_h)
         .map(|screen_y| {
             let world_y = camera.y + screen_y;
+            build_row((0..viewport_w).map(|screen_x| cell(world, explored, camera.x + screen_x, world_y)))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect::new(0, 0, area.width, map_height),
+    );
+
+    let status = format!("turn {} - Esc for menu, m for map", world.turn);
+    frame.render_widget(
+        Paragraph::new(status),
+        Rect::new(0, map_height, area.width, 1),
+    );
+}
+
+/// The 'm' overview: everything explored so far around the player, ignoring
+/// current sight radius. Not yet scrollable/zoomed beyond the normal
+/// viewport - future work if the world grows large enough to need that.
+fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored) {
+    let area = frame.area();
+    let map_height = area.height.saturating_sub(1);
+    let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
+
+    let cam_x = (world.player.pos.x - viewport_w / 2).clamp(0, (world.map.width - viewport_w).max(0));
+    let cam_y = (world.player.pos.y - viewport_h / 2).clamp(0, (world.map.height - viewport_h).max(0));
+
+    let lines: Vec<Line> = (0..viewport_h)
+        .map(|screen_y| {
+            let world_y = cam_y + screen_y;
             let row: String = (0..viewport_w)
                 .map(|screen_x| {
-                    let world_x = camera.x + screen_x;
+                    let world_x = cam_x + screen_x;
                     if world_x == world.player.pos.x && world_y == world.player.pos.y {
                         '@'
+                    } else if explored.is_seen(world_x, world_y) {
+                        world.map.tile(world_x, world_y).map(Tile::glyph).unwrap_or(' ')
                     } else {
-                        world
-                            .map
-                            .tile(world_x, world_y)
-                            .map(Tile::glyph)
-                            .unwrap_or(' ')
+                        ' '
                     }
                 })
                 .collect();
@@ -82,9 +159,8 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera) {
         Rect::new(0, 0, area.width, map_height),
     );
 
-    let status = format!("turn {} - Esc for menu", world.turn);
     frame.render_widget(
-        Paragraph::new(status),
+        Paragraph::new("Map - Esc to return"),
         Rect::new(0, map_height, area.width, 1),
     );
 }
