@@ -1,0 +1,7 @@
+[package]
+name = "scourge-net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+scourge-core = { path = "../scourge-core" }

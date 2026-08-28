@@ -1,0 +1,13 @@
+[package]
+name = "scourge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+scourge-core = { path = "../scourge-core" }
+scourge-data = { path = "../scourge-data" }
+scourge-world = { path = "../scourge-world" }
+scourge-net = { path = "../scourge-net" }
+scourge-input = { path = "../scourge-input" }
+scourge-render = { path = "../scourge-render" }
+scourge-render-term = { path = "../scourge-render-term" }

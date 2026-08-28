@@ -1,0 +1,8 @@
+[package]
+name = "scourge-world"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+scourge-core = { path = "../scourge-core" }
+scourge-data = { path = "../scourge-data" }

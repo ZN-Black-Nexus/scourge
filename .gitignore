@@ -1,0 +1,3 @@
+/target
+# Per-user runtime settings (keybindings, etc.), not project content.
+/config
