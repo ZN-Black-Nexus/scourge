@@ -69,7 +69,9 @@ pub enum TileColor {
     Brown,
     Cyan,
     Green,
+    DarkGreen,
     Blue,
+    Magenta,
 }
 
 /// A single terrain type. More kinds (rubble, water...) land here as they're needed.
@@ -81,6 +83,8 @@ pub enum Tile {
     Dirt,
     /// The dominant outdoor ground cover; Dirt appears in patches on top of it.
     Grass,
+    /// Walkable, doesn't block sight - just a taller/denser look than Grass.
+    TallGrass,
     Wall,
     DoorClosed,
     DoorOpen,
@@ -91,13 +95,20 @@ pub enum Tile {
     Window { open: bool, curtain_open: bool },
     /// Blocks both movement and sight, like real dense underbrush.
     BlueberryBush,
+    /// Blocks both movement and sight - a bigger obstacle than a bush.
+    Tree,
 }
 
 impl Tile {
     pub fn is_walkable(self) -> bool {
         matches!(
             self,
-            Tile::Floor | Tile::Dirt | Tile::Grass | Tile::DoorOpen | Tile::Window { open: true, .. }
+            Tile::Floor
+                | Tile::Dirt
+                | Tile::Grass
+                | Tile::TallGrass
+                | Tile::DoorOpen
+                | Tile::Window { open: true, .. }
         )
     }
 
@@ -108,18 +119,21 @@ impl Tile {
                 | Tile::DoorClosed
                 | Tile::Window { curtain_open: false, .. }
                 | Tile::BlueberryBush
+                | Tile::Tree
         )
     }
 
     pub fn glyph(self) -> char {
         match self {
             Tile::Floor | Tile::Dirt | Tile::Grass => '.',
+            Tile::TallGrass => ',',
             Tile::Wall => '#',
             Tile::DoorClosed => '+',
             Tile::DoorOpen => '\'',
             Tile::Window { open: true, .. } => '_',
             Tile::Window { open: false, .. } => '"',
             Tile::BlueberryBush => '*',
+            Tile::Tree => 't',
         }
     }
 
@@ -128,10 +142,12 @@ impl Tile {
             Tile::Floor => TileColor::Default,
             Tile::Dirt => TileColor::Brown,
             Tile::Grass => TileColor::Green,
+            Tile::TallGrass => TileColor::DarkGreen,
             Tile::Wall => TileColor::Gray,
             Tile::DoorClosed | Tile::DoorOpen => TileColor::Brown,
             Tile::Window { .. } => TileColor::Cyan,
             Tile::BlueberryBush => TileColor::Blue,
+            Tile::Tree => TileColor::DarkGreen,
         }
     }
 }

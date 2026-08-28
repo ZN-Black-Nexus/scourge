@@ -125,20 +125,32 @@ fn ratatui_color(c: TileColor) -> Color {
         (ColorSupport::TrueColor, TileColor::Brown) => Color::Rgb(139, 90, 43),
         (ColorSupport::TrueColor, TileColor::Cyan) => Color::Rgb(140, 220, 220),
         (ColorSupport::TrueColor, TileColor::Green) => Color::Rgb(50, 150, 60),
+        (ColorSupport::TrueColor, TileColor::DarkGreen) => Color::Rgb(25, 90, 35),
         (ColorSupport::TrueColor, TileColor::Blue) => Color::Rgb(70, 110, 220),
+        (ColorSupport::TrueColor, TileColor::Magenta) => Color::Rgb(220, 90, 200),
         (ColorSupport::Ansi256, TileColor::White) => Color::Indexed(15),
         (ColorSupport::Ansi256, TileColor::Gray) => Color::Indexed(248),
         (ColorSupport::Ansi256, TileColor::Brown) => Color::Indexed(94),
         (ColorSupport::Ansi256, TileColor::Cyan) => Color::Indexed(87),
         (ColorSupport::Ansi256, TileColor::Green) => Color::Indexed(70),
+        (ColorSupport::Ansi256, TileColor::DarkGreen) => Color::Indexed(22),
         (ColorSupport::Ansi256, TileColor::Blue) => Color::Indexed(69),
+        (ColorSupport::Ansi256, TileColor::Magenta) => Color::Indexed(170),
         (ColorSupport::Basic, TileColor::White) => Color::White,
         (ColorSupport::Basic, TileColor::Gray) => Color::Gray,
         (ColorSupport::Basic, TileColor::Brown) => Color::Yellow,
         (ColorSupport::Basic, TileColor::Cyan) => Color::Cyan,
         (ColorSupport::Basic, TileColor::Green) => Color::Green,
+        (ColorSupport::Basic, TileColor::DarkGreen) => Color::Green,
         (ColorSupport::Basic, TileColor::Blue) => Color::Blue,
+        (ColorSupport::Basic, TileColor::Magenta) => Color::Magenta,
     }
+}
+
+/// The marker shown for an item sitting on the ground - distinct from any
+/// terrain color so it stands out at a glance.
+fn item_marker_color() -> Color {
+    ratatui_color(TileColor::Magenta)
 }
 
 /// The player glyph's color - white, like real DDA's `@`.
@@ -155,14 +167,25 @@ fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32
     if x == world.player.pos.x && y == world.player.pos.y {
         return ('@', Style::default().fg(player_color()));
     }
+    // A ground item sitting on a tile needs its own marker - otherwise it's
+    // invisible on the map, since the cell would just show plain terrain and
+    // you'd only ever find out something's there by looking (x) at the exact
+    // tile. `?` overrides the terrain glyph but not its brightness tier.
+    let has_item = !world.items_at(x, y).is_empty();
     if visible.is_visible(x, y) {
         let (dx, dy) = (x - world.player.pos.x, y - world.player.pos.y);
         let near = dx * dx + dy * dy <= NEAR_RADIUS * NEAR_RADIUS;
-        let style = Style::default().fg(ratatui_color(world.map.color_at(x, y)));
+        let style = if has_item {
+            Style::default().fg(item_marker_color())
+        } else {
+            Style::default().fg(ratatui_color(world.map.color_at(x, y)))
+        };
         let style = if near { style } else { style.add_modifier(Modifier::DIM) };
-        (world.map.glyph_at(x, y), style)
+        let glyph = if has_item { '?' } else { world.map.glyph_at(x, y) };
+        (glyph, style)
     } else if explored.is_seen(x, y) {
-        (world.map.glyph_at(x, y), Style::default().fg(Color::DarkGray))
+        let glyph = if has_item { '?' } else { world.map.glyph_at(x, y) };
+        (glyph, Style::default().fg(Color::DarkGray))
     } else {
         (' ', Style::default())
     }
@@ -280,6 +303,7 @@ fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i3
             Some(Tile::Floor) => "floor",
             Some(Tile::Dirt) => "dirt",
             Some(Tile::Grass) => "grass",
+            Some(Tile::TallGrass) => "tall grass",
             Some(Tile::Wall) => "a wall",
             Some(Tile::DoorClosed) => "a closed door",
             Some(Tile::DoorOpen) => "an open door",
@@ -287,6 +311,7 @@ fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i3
             Some(Tile::Window { open: false, curtain_open: true }) => "a window",
             Some(Tile::Window { open: false, curtain_open: false }) => "a curtained window",
             Some(Tile::BlueberryBush) => "a blueberry bush",
+            Some(Tile::Tree) => "a tree",
             None => "unknown",
         }
     };
@@ -320,7 +345,11 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x:
                 if world_x == world.player.pos.x && world_y == world.player.pos.y {
                     ('@', Style::default().fg(player_color()))
                 } else if explored.is_seen(world_x, world_y) {
-                    (world.map.glyph_at(world_x, world_y), Style::default().fg(Color::DarkGray))
+                    if world.items_at(world_x, world_y).is_empty() {
+                        (world.map.glyph_at(world_x, world_y), Style::default().fg(Color::DarkGray))
+                    } else {
+                        ('?', Style::default().fg(item_marker_color()))
+                    }
                 } else {
                     (' ', Style::default())
                 }

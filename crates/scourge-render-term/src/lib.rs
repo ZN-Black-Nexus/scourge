@@ -6,9 +6,12 @@ mod ui;
 
 use std::io;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEvent};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, MouseEvent,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, ExecutableCommand};
 use ratatui::backend::CrosstermBackend;
@@ -26,61 +29,10 @@ fn viewport_size() -> (i32, i32) {
         .unwrap_or((80, 24))
 }
 
-/// A legacy terminal can't tell a genuine second keypress apart from the OS
-/// auto-repeating a held key - both arrive as identical `Press` events. DDA
-/// requires spamming the key yourself; holding it down doesn't keep moving
-/// you. This approximates that: the same key arriving again faster than a
-/// deliberate human re-press plausibly could is treated as auto-repeat and
-/// dropped, so only the first press of a hold actually steps the world.
-const MOVE_REPEAT_THRESHOLD: Duration = Duration::from_millis(150);
-
-struct MoveRepeatGuard {
-    last: Option<(KeyCode, Instant)>,
-}
-
-impl MoveRepeatGuard {
-    fn new() -> Self {
-        MoveRepeatGuard { last: None }
-    }
-
-    fn allow(&mut self, code: KeyCode) -> bool {
-        self.allow_at(code, Instant::now())
-    }
-
-    fn allow_at(&mut self, code: KeyCode, now: Instant) -> bool {
-        let is_repeat = matches!(self.last, Some((last_code, at)) if last_code == code && now.duration_since(at) < MOVE_REPEAT_THRESHOLD);
-        self.last = Some((code, now));
-        !is_repeat
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn suppresses_fast_repeats_but_allows_slow_ones_and_other_keys() {
-        let mut guard = MoveRepeatGuard::new();
-        let t0 = Instant::now();
-
-        assert!(guard.allow_at(KeyCode::Char('h'), t0), "first press always allowed");
-        assert!(
-            !guard.allow_at(KeyCode::Char('h'), t0 + Duration::from_millis(30)),
-            "same key 30ms later looks like OS auto-repeat, not a fresh press"
-        );
-        assert!(
-            guard.allow_at(KeyCode::Char('h'), t0 + Duration::from_millis(300)),
-            "same key 300ms later is a deliberate re-press"
-        );
-        assert!(
-            guard.allow_at(KeyCode::Char('l'), t0 + Duration::from_millis(310)),
-            "a different key right after is never suppressed"
-        );
-    }
-}
-
 /// Restores the terminal on drop, including on panic, so a crash doesn't leave the user's shell broken.
-struct TerminalGuard;
+struct TerminalGuard {
+    keyboard_enhanced: bool,
+}
 
 impl TerminalGuard {
     fn new() -> io::Result<Self> {
@@ -92,13 +44,33 @@ impl TerminalGuard {
             crossterm::event::EnableMouseCapture
         )?;
         out.execute(crossterm::cursor::Hide)?;
-        Ok(TerminalGuard)
+
+        // A legacy terminal reports OS auto-repeat of a held key and a
+        // genuine fast re-press as identical events - there's no way to
+        // tell them apart, which is exactly why DDA requires physically
+        // repeated presses to keep moving. Where the terminal supports the
+        // Kitty keyboard protocol (Alacritty, kitty, WezTerm, foot, and
+        // others), it reports them distinctly, so we can honor both at
+        // once: any number of real presses, however fast, all move you;
+        // holding down a key does not.
+        let keyboard_enhanced = terminal::supports_keyboard_enhancement().unwrap_or(false);
+        if keyboard_enhanced {
+            execute!(
+                out,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+            )?;
+        }
+
+        Ok(TerminalGuard { keyboard_enhanced })
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut out = io::stdout();
+        if self.keyboard_enhanced {
+            let _ = execute!(out, PopKeyboardEnhancementFlags);
+        }
         let _ = execute!(
             out,
             crossterm::cursor::Show,
@@ -129,7 +101,6 @@ pub fn run(mut world: World) -> io::Result<()> {
     let mut last_turn = world.turn;
 
     let mut screen = Screen::Game;
-    let mut move_guard = MoveRepeatGuard::new();
 
     loop {
         if world.turn != last_turn {
@@ -148,7 +119,7 @@ pub fn run(mut world: World) -> io::Result<()> {
                 Event::Resize(_, _) => {}
                 Event::Mouse(MouseEvent { .. }) => {}
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if !handle_key(key.code, &mut screen, &mut world, &mut binds, &config_path, &mut move_guard) {
+                    if !handle_key(key.code, &mut screen, &mut world, &mut binds, &config_path) {
                         return Ok(());
                     }
                 }
@@ -168,7 +139,6 @@ fn handle_key(
     world: &mut World,
     binds: &mut KeyBindings,
     config_path: &std::path::Path,
-    move_guard: &mut MoveRepeatGuard,
 ) -> bool {
     match screen {
         Screen::Game => {
@@ -190,14 +160,8 @@ fn handle_key(
                 if action == Action::OpenWieldMenu {
                     // UI-only - never reaches world.step, just switches screens.
                     *screen = Screen::WieldSelect;
-                } else {
-                    // Only movement requires the repeated-press discipline
-                    // DDA has; opening doors, picking things up etc. aren't
-                    // the "holding a direction" case this guards against.
-                    let allowed = !matches!(action, Action::Move(_)) || move_guard.allow(code);
-                    if allowed && !world.step(action) {
-                        return false;
-                    }
+                } else if !world.step(action) {
+                    return false;
                 }
             }
         }

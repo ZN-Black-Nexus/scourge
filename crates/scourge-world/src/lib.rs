@@ -67,32 +67,24 @@ pub fn generate(width: i32, height: i32) -> Generated {
             placed.push(rect);
         }
 
-        scatter_bushes(&mut map, &mut rng);
+        scatter_vegetation(&mut map, &mut rng);
         items = scatter_items(&map, &mut rng);
-
-        // Keep the spawn area clear so the player never starts boxed in or inside a wall.
-        let (cx, cy) = (width / 2, height / 2);
-        for dy in -2..=2 {
-            for dx in -2..=2 {
-                map.set(cx + dx, cy + dy, Tile::Grass);
-            }
-        }
     }
 
     Generated { map, items }
 }
 
 fn is_open_ground(tile: Option<Tile>) -> bool {
-    matches!(tile, Some(Tile::Grass) | Some(Tile::Dirt))
+    matches!(tile, Some(Tile::Grass) | Some(Tile::Dirt) | Some(Tile::TallGrass))
 }
 
-/// A few natural-looking dirt patches (small filled circles, not per-tile
-/// noise) scattered across the grass.
+/// Natural-looking dirt patches (small filled circles, not per-tile noise)
+/// scattered across the grass.
 fn scatter_dirt_patches(map: &mut Map, rng: &mut impl Rng) {
-    let patch_count = (map.width * map.height) / 800;
+    let patch_count = (map.width * map.height) / 500;
     for _ in 0..patch_count {
         let (cx, cy) = (rng.gen_range(1..map.width - 1), rng.gen_range(1..map.height - 1));
-        let radius = rng.gen_range(2..5);
+        let radius = rng.gen_range(2..6);
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 if dx * dx + dy * dy <= radius * radius && rng.gen_bool(0.6) {
@@ -106,14 +98,40 @@ fn scatter_dirt_patches(map: &mut Map, rng: &mut impl Rng) {
     }
 }
 
-/// Scatters blueberry bushes across open ground, never inside a building.
-fn scatter_bushes(map: &mut Map, rng: &mut impl Rng) {
-    let count = (map.width * map.height) / 250;
-    for _ in 0..count {
+/// Scatters ground vegetation across open terrain, never inside a building:
+/// tall grass patches, blueberry bushes, and trees.
+fn scatter_vegetation(map: &mut Map, rng: &mut impl Rng) {
+    let grass_patches = (map.width * map.height) / 900;
+    for _ in 0..grass_patches {
+        let (cx, cy) = (rng.gen_range(1..map.width - 1), rng.gen_range(1..map.height - 1));
+        let radius = rng.gen_range(2..6);
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy <= radius * radius && rng.gen_bool(0.5) {
+                    let (x, y) = (cx + dx, cy + dy);
+                    if is_open_ground(map.tile(x, y)) {
+                        map.set(x, y, Tile::TallGrass);
+                    }
+                }
+            }
+        }
+    }
+
+    let bush_count = (map.width * map.height) / 250;
+    for _ in 0..bush_count {
         let x = rng.gen_range(1..map.width - 1);
         let y = rng.gen_range(1..map.height - 1);
         if is_open_ground(map.tile(x, y)) {
             map.set(x, y, Tile::BlueberryBush);
+        }
+    }
+
+    let tree_count = (map.width * map.height) / 180;
+    for _ in 0..tree_count {
+        let x = rng.gen_range(1..map.width - 1);
+        let y = rng.gen_range(1..map.height - 1);
+        if is_open_ground(map.tile(x, y)) {
+            map.set(x, y, Tile::Tree);
         }
     }
 }
@@ -216,16 +234,14 @@ mod tests {
             .count();
         assert!(floor_count > 0, "building interiors should be Floor, distinct from outdoor ground");
 
-        let (cx, cy) = (map.width / 2, map.height / 2);
-        for dy in -2..=2 {
-            for dx in -2..=2 {
-                assert_eq!(
-                    map.tile(cx + dx, cy + dy),
-                    Some(Tile::Grass),
-                    "spawn area (outdoors) must stay walkable grass, not floor"
-                );
-            }
-        }
+        // Spawn safety is World's job (nearest_walkable), not generate()'s -
+        // generate() no longer force-clears the map center, since doing so
+        // used to be able to punch a hole in a building that landed there.
+        let world = scourge_core::World::new(generated.map.clone());
+        assert!(
+            world.map.tile(world.player.pos.x, world.player.pos.y).unwrap().is_walkable(),
+            "player must always spawn on a walkable tile"
+        );
 
         assert!(!generated.items.is_empty(), "expected some scattered ground items");
     }
