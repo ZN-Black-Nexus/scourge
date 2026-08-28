@@ -37,6 +37,9 @@ pub const SETTINGS_ITEMS: [&str; 3] = [
 pub enum Screen {
     Game,
     Inventory,
+    /// 'w'/'h' (preset-dependent): pick an inventory letter to wield, or
+    /// '-' to empty your hands.
+    WieldSelect,
     /// Free-look cursor: uses your character's real current sight (not
     /// memory-only like the map screen), lets you inspect anything within
     /// it even off the normal viewport, without moving or costing a turn.
@@ -69,6 +72,7 @@ pub fn draw(
     match screen {
         Screen::Game | Screen::Look { .. } | Screen::Map { .. } => {}
         Screen::Inventory => draw_inventory(frame, world),
+        Screen::WieldSelect => draw_wield_select(frame, world),
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
@@ -217,7 +221,7 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &m
         Rect::new(0, 0, area.width, map_height),
     );
 
-    let status = format!("turn {} - Esc:menu m:map x:look i:inventory g:get o/c:open/close", world.turn);
+    let status = format!("turn {} - Esc:menu m:map x:look i:inv g:get o/c:open/close", world.turn);
     frame.render_widget(
         Paragraph::new(status),
         Rect::new(0, map_height, area.width, 1),
@@ -338,23 +342,42 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x:
 /// volume, categories, or containers yet (nothing to compute those from -
 /// items are just names right now); just enough to see what you're
 /// carrying, matching the look DDA's inventory screen is going for.
+fn inventory_letters(inventory: &[scourge_core::Item]) -> Vec<ListItem<'static>> {
+    if inventory.is_empty() {
+        return vec![ListItem::new("(nothing carried)")];
+    }
+    inventory
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let letter = (b'a' + (i as u8 % 26)) as char;
+            ListItem::new(format!("{letter} - {}", item.name))
+        })
+        .collect()
+}
+
 fn draw_inventory(frame: &mut Frame, world: &World) {
     let popup = centered_rect(70, 70, frame.area());
     let title = format!("Inventory ({} items) - Esc to close", world.player.inventory.len());
-    let list_items: Vec<ListItem> = if world.player.inventory.is_empty() {
-        vec![ListItem::new("(nothing carried)")]
-    } else {
-        world
-            .player
-            .inventory
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let letter = (b'a' + (i as u8 % 26)) as char;
-                ListItem::new(format!("{letter} - {}", item.name))
-            })
-            .collect()
-    };
+    let mut list_items = vec![ListItem::new(match &world.player.wielded {
+        Some(item) => format!("Wielding: {}", item.name),
+        None => "Wielding: nothing".to_string(),
+    })];
+    list_items.extend(inventory_letters(&world.player.inventory));
+    let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
+/// 'w'/'h': pick a letter to wield, or '-' to empty your hands.
+fn draw_wield_select(frame: &mut Frame, world: &World) {
+    let popup = centered_rect(70, 70, frame.area());
+    let title = "Wield what? (letter to pick, - for empty hands, Esc to cancel)";
+    let mut list_items = vec![ListItem::new(match &world.player.wielded {
+        Some(item) => format!("Currently wielding: {}", item.name),
+        None => "Currently wielding: nothing".to_string(),
+    })];
+    list_items.extend(inventory_letters(&world.player.inventory));
     let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);

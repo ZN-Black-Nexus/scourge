@@ -43,6 +43,17 @@ pub enum Action {
     Quit,
     /// Picks up the topmost item on the player's current tile, if any.
     PickUp,
+    /// UI-only: opens the wield-selection screen. Never actually reaches
+    /// `World::step` in normal play (the render layer intercepts it), but
+    /// still routed through the same preset-aware key resolution as every
+    /// other action, since which key triggers it differs by preset ('w'
+    /// for vi, 'h' for wasd - see KEYBINDS.md).
+    OpenWieldMenu,
+    /// Wields inventory item at this index, unwielding (back to inventory)
+    /// whatever was wielded before.
+    Wield(usize),
+    /// Empties your hands, returning the wielded item to inventory.
+    Unwield,
 }
 
 /// Backend-agnostic terrain color name. `scourge-core` has no rendering
@@ -315,6 +326,9 @@ pub struct Item {
 pub struct Player {
     pub pos: Pos,
     pub inventory: Vec<Item>,
+    /// The one item currently held in hand, distinct from carried inventory
+    /// - matches DDA's model of wielding being separate from just carrying.
+    pub wielded: Option<Item>,
 }
 
 pub struct World {
@@ -331,6 +345,7 @@ impl World {
             player: Player {
                 pos: Pos { x: 0, y: 0 },
                 inventory: Vec::new(),
+                wielded: None,
             },
             turn: 0,
             ground_items: std::collections::HashMap::new(),
@@ -435,6 +450,25 @@ impl World {
                     }
                 }
             }
+            // Never actually reaches here in normal play - the render layer
+            // intercepts it to open a UI screen instead. Harmless no-op if
+            // it ever does slip through.
+            Action::OpenWieldMenu => {}
+            Action::Wield(index) => {
+                if index < self.player.inventory.len() {
+                    let new_wielded = self.player.inventory.remove(index);
+                    if let Some(old) = self.player.wielded.replace(new_wielded) {
+                        self.player.inventory.push(old);
+                    }
+                    self.turn += 1;
+                }
+            }
+            Action::Unwield => {
+                if let Some(old) = self.player.wielded.take() {
+                    self.player.inventory.push(old);
+                    self.turn += 1;
+                }
+            }
         }
         true
     }
@@ -460,6 +494,33 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(name: &str) -> Item {
+        Item { name: name.to_string() }
+    }
+
+    #[test]
+    fn wielding_swaps_with_whatever_was_already_wielded() {
+        let map = Map::new(3, 3, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.inventory = vec![item("Rock"), item("Stick")];
+
+        world.step(Action::Wield(0));
+        assert_eq!(world.player.wielded, Some(item("Rock")));
+        assert_eq!(world.player.inventory, vec![item("Stick")]);
+        assert_eq!(world.turn, 1);
+
+        // Wielding the stick puts the rock back in inventory.
+        world.step(Action::Wield(0));
+        assert_eq!(world.player.wielded, Some(item("Stick")));
+        assert_eq!(world.player.inventory, vec![item("Rock")]);
+        assert_eq!(world.turn, 2);
+
+        world.step(Action::Unwield);
+        assert_eq!(world.player.wielded, None);
+        assert!(world.player.inventory.contains(&item("Stick")));
+        assert_eq!(world.turn, 3);
+    }
 
     #[test]
     fn blueberry_bushes_block_both_sight_and_movement() {

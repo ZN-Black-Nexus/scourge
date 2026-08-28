@@ -44,7 +44,8 @@ its most-used action keys.
   `h j k l y u b n` (plus `v`/`p`, unused by DDA entirely) - 10 free
   letters for 5 actions, so pairs are affordable. Pick synonyms that land
   on a free letter, keeping DDA's same-letter-shift-pair convention:
-  - wield/wear -> **hold/wear**: `h` / `H`
+  - **wield -> "hold": `h`** — implemented. Vi preset keeps DDA's real `w`.
+    Wear (as a separate action from wield) not built yet.
   - apply -> **use**: `u`
   - **close -> "bar" (as in bar the door): `b`** — implemented. Vi preset
     keeps DDA's real `c`.

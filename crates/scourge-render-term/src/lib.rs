@@ -187,18 +187,39 @@ fn handle_key(
             } else if code == KeyCode::Char('i') {
                 *screen = Screen::Inventory;
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
-                // Only movement requires the repeated-press discipline DDA
-                // has; opening doors, picking things up etc. aren't the
-                // "holding a direction" case this guards against.
-                let allowed = !matches!(action, Action::Move(_)) || move_guard.allow(code);
-                if allowed && !world.step(action) {
-                    return false;
+                if action == Action::OpenWieldMenu {
+                    // UI-only - never reaches world.step, just switches screens.
+                    *screen = Screen::WieldSelect;
+                } else {
+                    // Only movement requires the repeated-press discipline
+                    // DDA has; opening doors, picking things up etc. aren't
+                    // the "holding a direction" case this guards against.
+                    let allowed = !matches!(action, Action::Move(_)) || move_guard.allow(code);
+                    if allowed && !world.step(action) {
+                        return false;
+                    }
                 }
             }
         }
         Screen::Inventory => {
             if code == KeyCode::Esc {
                 *screen = Screen::Game;
+            }
+        }
+        Screen::WieldSelect => {
+            if code == KeyCode::Esc {
+                *screen = Screen::Game;
+            } else if code == KeyCode::Char('-') {
+                world.step(Action::Unwield);
+                *screen = Screen::Game;
+            } else if let KeyCode::Char(c) = code {
+                if c.is_ascii_lowercase() {
+                    let index = (c as u8 - b'a') as usize;
+                    if index < world.player.inventory.len() {
+                        world.step(Action::Wield(index));
+                        *screen = Screen::Game;
+                    }
+                }
             }
         }
         Screen::Look { cursor_x, cursor_y } => {

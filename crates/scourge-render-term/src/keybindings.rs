@@ -45,10 +45,11 @@ impl KeyBindings {
             (KeyCode::Char('b'), SouthWest),
             (KeyCode::Char('n'), SouthEast),
         ];
-        // 'c' (close) is real DDA's own binding - free here since vi
-        // movement never touches it.
+        // 'c' (close) and 'w' (wield) are real DDA's own bindings - free
+        // here since vi movement never touches either.
         let mut kb = Self::from_pairs(&pairs);
         kb.bindings.insert(KeyCode::Char('c'), Action::Close);
+        kb.bindings.insert(KeyCode::Char('w'), Action::OpenWieldMenu);
         kb
     }
 
@@ -66,10 +67,12 @@ impl KeyBindings {
             (KeyCode::Char('z'), SouthWest),
             (KeyCode::Char('c'), SouthEast),
         ];
-        // 'c' is taken by movement here, so close uses a synonym instead
-        // ("bar the door") on one of wasd's free letters (see KEYBINDS.md).
+        // 'c' and 'w' are both taken by movement here, so close and wield
+        // use synonyms instead on wasd's free letters (see KEYBINDS.md):
+        // "bar" the door, "hold" an item.
         let mut kb = Self::from_pairs(&pairs);
         kb.bindings.insert(KeyCode::Char('b'), Action::Close);
+        kb.bindings.insert(KeyCode::Char('h'), Action::OpenWieldMenu);
         kb
     }
 
