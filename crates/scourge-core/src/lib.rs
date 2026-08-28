@@ -34,17 +34,37 @@ pub fn direction_delta(dir: Direction) -> (i32, i32) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Move(Direction),
-    /// Opens/closes whatever's adjacent (a door, a window's sash, a
-    /// curtain) without needing to bump into it. Auto-targets the first
-    /// interactable neighbor found; no multi-target picker yet.
-    Interact,
+    /// Opens the first adjacent openable thing: a closed door, a closed
+    /// window sash, or (if the sash is already open) its curtain.
+    Open,
+    /// The reverse of `Open`: closes an open door, closes an open window
+    /// sash, or (if the sash is already closed) closes its curtain.
+    Close,
     Quit,
+}
+
+/// Backend-agnostic terrain color. `scourge-core` has no rendering
+/// dependency, so this is just a small palette name - a renderer maps it to
+/// whatever color type it actually uses (see `scourge-render-term`).
+/// Deliberately limited to the basic ANSI 16 colors, not RGB/truecolor -
+/// bare Linux tty consoles typically only support that basic palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileColor {
+    Default,
+    Gray,
+    Yellow,
+    Cyan,
+    Green,
+    Blue,
 }
 
 /// A single terrain type. More kinds (rubble, water...) land here as they're needed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tile {
     Floor,
+    /// Outdoor ground, distinct from indoor `Floor` (same glyph, different
+    /// color - real DDA often distinguishes similar terrain this way too).
+    Dirt,
     Wall,
     DoorClosed,
     DoorOpen,
@@ -53,28 +73,48 @@ pub enum Tile {
     /// independent - closing curtains doesn't stop you walking through an
     /// open window, and an open window doesn't imply the curtain's aside.
     Window { open: bool, curtain_open: bool },
+    /// Walkable but blocks sight, like real underbrush.
+    BlueberryBush,
 }
 
 impl Tile {
     pub fn is_walkable(self) -> bool {
-        matches!(self, Tile::Floor | Tile::DoorOpen | Tile::Window { open: true, .. })
+        matches!(
+            self,
+            Tile::Floor | Tile::Dirt | Tile::DoorOpen | Tile::Window { open: true, .. } | Tile::BlueberryBush
+        )
     }
 
     pub fn is_transparent(self) -> bool {
         !matches!(
             self,
-            Tile::Wall | Tile::DoorClosed | Tile::Window { curtain_open: false, .. }
+            Tile::Wall
+                | Tile::DoorClosed
+                | Tile::Window { curtain_open: false, .. }
+                | Tile::BlueberryBush
         )
     }
 
     pub fn glyph(self) -> char {
         match self {
-            Tile::Floor => '.',
+            Tile::Floor | Tile::Dirt => '.',
             Tile::Wall => '#',
             Tile::DoorClosed => '+',
             Tile::DoorOpen => '\'',
             Tile::Window { open: true, .. } => '_',
             Tile::Window { open: false, .. } => '"',
+            Tile::BlueberryBush => '*',
+        }
+    }
+
+    pub fn color(self) -> TileColor {
+        match self {
+            Tile::Floor => TileColor::Default,
+            Tile::Dirt => TileColor::Yellow,
+            Tile::Wall => TileColor::Gray,
+            Tile::DoorClosed | Tile::DoorOpen => TileColor::Yellow,
+            Tile::Window { .. } => TileColor::Cyan,
+            Tile::BlueberryBush => TileColor::Blue,
         }
     }
 }
@@ -131,9 +171,21 @@ impl Map {
         }
     }
 
+    pub fn color_at(&self, x: i32, y: i32) -> TileColor {
+        self.tile(x, y).map(Tile::color).unwrap_or(TileColor::Default)
+    }
+
     fn wall_glyph(&self, x: i32, y: i32) -> char {
-        let is_wall = |dx: i32, dy: i32| self.tile(x + dx, y + dy) == Some(Tile::Wall);
-        let (n, s, e, w) = (is_wall(0, -1), is_wall(0, 1), is_wall(1, 0), is_wall(-1, 0));
+        // Doors and windows count as "wall-like" for corner shape purposes
+        // even though they render their own glyph - a corner sitting right
+        // next to a window is still structurally a corner, not a dead end.
+        let connects = |dx: i32, dy: i32| {
+            matches!(
+                self.tile(x + dx, y + dy),
+                Some(Tile::Wall) | Some(Tile::DoorClosed) | Some(Tile::DoorOpen) | Some(Tile::Window { .. })
+            )
+        };
+        let (n, s, e, w) = (connects(0, -1), connects(0, 1), connects(1, 0), connects(-1, 0));
         match (n, s, e, w) {
             (false, false, false, false) => '#',
             (false, false, false, true) => '─',
@@ -325,32 +377,40 @@ impl World {
                     _ => {}
                 }
             }
-            Action::Interact => self.interact(),
+            Action::Open => self.toggle_nearby(|t| match t {
+                Tile::DoorClosed => Some(Tile::DoorOpen),
+                Tile::Window { open: false, curtain_open } => {
+                    Some(Tile::Window { open: true, curtain_open })
+                }
+                Tile::Window { open: true, curtain_open: false } => {
+                    Some(Tile::Window { open: true, curtain_open: true })
+                }
+                _ => None,
+            }),
+            Action::Close => self.toggle_nearby(|t| match t {
+                Tile::DoorOpen => Some(Tile::DoorClosed),
+                Tile::Window { open: true, curtain_open } => {
+                    Some(Tile::Window { open: false, curtain_open })
+                }
+                Tile::Window { open: false, curtain_open: true } => {
+                    Some(Tile::Window { open: false, curtain_open: false })
+                }
+                _ => None,
+            }),
         }
         true
     }
 
-    /// Toggles the first interactable neighbor: opens a closed door, opens a
-    /// closed window sash, or toggles a window's curtain if the sash is
-    /// already open. Fixed scan order, no way to pick among several yet.
-    fn interact(&mut self) {
+    /// Applies `transition` to the first adjacent tile it has an answer for
+    /// (fixed scan order, no way to pick among several candidates yet).
+    fn toggle_nearby(&mut self, transition: impl Fn(Tile) -> Option<Tile>) {
         const OFFSETS: [(i32, i32); 8] = [
             (0, -1), (0, 1), (1, 0), (-1, 0),
             (1, -1), (-1, -1), (1, 1), (-1, 1),
         ];
         for (dx, dy) in OFFSETS {
             let (x, y) = (self.player.pos.x + dx, self.player.pos.y + dy);
-            let new_tile = match self.map.tile(x, y) {
-                Some(Tile::DoorClosed) => Some(Tile::DoorOpen),
-                Some(Tile::Window { open: false, curtain_open }) => {
-                    Some(Tile::Window { open: true, curtain_open })
-                }
-                Some(Tile::Window { open, curtain_open }) => {
-                    Some(Tile::Window { open, curtain_open: !curtain_open })
-                }
-                _ => None,
-            };
-            if let Some(tile) = new_tile {
+            if let Some(tile) = self.map.tile(x, y).and_then(&transition) {
                 self.map.set(x, y, tile);
                 self.turn += 1;
                 return;
@@ -362,6 +422,24 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_corner_next_to_a_window_still_renders_as_a_corner() {
+        // 3x3 building perimeter with a window replacing the top wall's
+        // east neighbor of the top-left corner.
+        let mut map = Map::new(5, 5, Tile::Floor);
+        for x in 1..4 {
+            map.set(x, 1, Tile::Wall);
+            map.set(x, 3, Tile::Wall);
+        }
+        for y in 1..4 {
+            map.set(1, y, Tile::Wall);
+            map.set(3, y, Tile::Wall);
+        }
+        map.set(2, 1, Tile::Window { open: false, curtain_open: true });
+
+        assert_eq!(map.glyph_at(1, 1), '┌', "top-left corner should stay a corner");
+    }
 
     #[test]
     fn bumping_a_closed_door_opens_it_but_does_not_move_you() {
@@ -381,26 +459,33 @@ mod tests {
     }
 
     #[test]
-    fn interact_opens_a_window_then_toggles_its_curtain() {
+    fn open_then_close_a_window_cycles_sash_and_curtain() {
         let mut map = Map::new(3, 3, Tile::Floor);
         map.set(2, 1, Tile::Window { open: false, curtain_open: true });
         let mut world = World::new(map);
         world.player.pos = Pos { x: 1, y: 1 };
 
-        world.step(Action::Interact);
+        world.step(Action::Open);
         assert_eq!(
             world.map.tile(2, 1),
             Some(Tile::Window { open: true, curtain_open: true }),
-            "first interact opens the sash"
+            "opens the sash first"
         );
 
-        world.step(Action::Interact);
+        world.step(Action::Close);
         assert_eq!(
             world.map.tile(2, 1),
-            Some(Tile::Window { open: true, curtain_open: false }),
-            "second interact toggles the curtain since the sash is already open"
+            Some(Tile::Window { open: false, curtain_open: true }),
+            "closes the sash back, leaving the curtain untouched"
         );
-        assert_eq!(world.turn, 2);
+
+        world.step(Action::Close);
+        assert_eq!(
+            world.map.tile(2, 1),
+            Some(Tile::Window { open: false, curtain_open: false }),
+            "sash already closed, so this closes the curtain instead - matches DDA"
+        );
+        assert_eq!(world.turn, 3);
     }
 
     #[test]

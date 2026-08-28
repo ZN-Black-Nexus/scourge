@@ -45,7 +45,11 @@ impl KeyBindings {
             (KeyCode::Char('b'), SouthWest),
             (KeyCode::Char('n'), SouthEast),
         ];
-        Self::from_pairs(&pairs)
+        // 'c' (close) is real DDA's own binding - free here since vi
+        // movement never touches it.
+        let mut kb = Self::from_pairs(&pairs);
+        kb.bindings.insert(KeyCode::Char('c'), Action::Close);
+        kb
     }
 
     /// wasd cardinals, with qweazxc for diagonals (spatially: q/e above,
@@ -62,15 +66,19 @@ impl KeyBindings {
             (KeyCode::Char('z'), SouthWest),
             (KeyCode::Char('c'), SouthEast),
         ];
-        Self::from_pairs(&pairs)
+        // 'c' is taken by movement here, so close uses a synonym instead
+        // ("bar the door") on one of wasd's free letters (see KEYBINDS.md).
+        let mut kb = Self::from_pairs(&pairs);
+        kb.bindings.insert(KeyCode::Char('b'), Action::Close);
+        kb
     }
 
     fn from_pairs(pairs: &[(KeyCode, Direction)]) -> Self {
         let mut bindings: HashMap<KeyCode, Action> =
             pairs.iter().map(|(k, d)| (*k, Action::Move(*d))).collect();
-        // 'o' (open/interact) is shared by both presets - it's not a letter
-        // either movement scheme uses, and matches real DDA's own binding.
-        bindings.insert(KeyCode::Char('o'), Action::Interact);
+        // 'o' (open) is shared by both presets - it's not a letter either
+        // movement scheme uses, and matches real DDA's own binding.
+        bindings.insert(KeyCode::Char('o'), Action::Open);
         KeyBindings { bindings }
     }
 

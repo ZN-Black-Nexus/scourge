@@ -31,7 +31,9 @@ impl Rect {
 /// clutter. Placeholder for real mapgen - no multi-room buildings, furniture,
 /// or loot yet.
 pub fn generate(width: i32, height: i32) -> Map {
-    let mut map = Map::new(width, height, Tile::Floor);
+    // Outdoor ground is Dirt; building interiors get carved to Floor below,
+    // so the two stay visually distinct instead of everything looking the same.
+    let mut map = Map::new(width, height, Tile::Dirt);
     border_walls(&mut map);
 
     if width > 12 && height > 12 {
@@ -53,16 +55,30 @@ pub fn generate(width: i32, height: i32) -> Map {
             placed.push(rect);
         }
 
+        scatter_bushes(&mut map, &mut rng);
+
         // Keep the spawn area clear so the player never starts boxed in or inside a wall.
         let (cx, cy) = (width / 2, height / 2);
         for dy in -2..=2 {
             for dx in -2..=2 {
-                map.set(cx + dx, cy + dy, Tile::Floor);
+                map.set(cx + dx, cy + dy, Tile::Dirt);
             }
         }
     }
 
     map
+}
+
+/// Scatters blueberry bushes across open ground, never inside a building.
+fn scatter_bushes(map: &mut Map, rng: &mut impl Rng) {
+    let count = (map.width * map.height) / 250;
+    for _ in 0..count {
+        let x = rng.gen_range(1..map.width - 1);
+        let y = rng.gen_range(1..map.height - 1);
+        if map.tile(x, y) == Some(Tile::Dirt) {
+            map.set(x, y, Tile::BlueberryBush);
+        }
+    }
 }
 
 fn border_walls(map: &mut Map) {
@@ -141,13 +157,19 @@ mod tests {
             .count();
         assert!(door_count > 0, "expected at least one building with a closed door");
 
+        let floor_count = (0..map.height)
+            .flat_map(|y| (0..map.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| map.tile(x, y) == Some(Tile::Floor))
+            .count();
+        assert!(floor_count > 0, "building interiors should be Floor, distinct from outdoor Dirt");
+
         let (cx, cy) = (map.width / 2, map.height / 2);
         for dy in -2..=2 {
             for dx in -2..=2 {
                 assert_eq!(
                     map.tile(cx + dx, cy + dy),
-                    Some(Tile::Floor),
-                    "spawn area must stay walkable"
+                    Some(Tile::Dirt),
+                    "spawn area (outdoors) must stay walkable dirt, not floor"
                 );
             }
         }

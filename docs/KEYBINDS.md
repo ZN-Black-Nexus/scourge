@@ -46,8 +46,10 @@ its most-used action keys.
   on a free letter, keeping DDA's same-letter-shift-pair convention:
   - wield/wear -> **hold/wear**: `h` / `H`
   - apply -> **use**: `u`
-  - drop, examine, close: still open - land wherever's mnemonic once
-    those systems actually exist (no rush, nothing to bind them to yet).
+  - **close -> "bar" (as in bar the door): `b`** — implemented. Vi preset
+    keeps DDA's real `c`.
+  - drop, examine: still open - land wherever's mnemonic once those
+    systems actually exist (no rush, nothing to bind them to yet).
 - This is a *default*, not a constraint - full custom rebinding already
   exists (`scourge-render-term`'s Settings screen), so a player can always
   override any of this.

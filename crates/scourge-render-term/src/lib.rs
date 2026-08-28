@@ -79,19 +79,25 @@ pub fn run(mut world: World) -> io::Result<()> {
         }
         terminal.draw(|frame| ui::draw(frame, &world, &screen, &binds, &mut camera, &mut explored, &visible))?;
 
-        match event::read()? {
-            // The map is a fixed persistent world now, not regenerated per
-            // screen size, so a resize just needs a redraw (next loop turn).
-            Event::Resize(_, _) => {}
-            // Enabling mouse capture stops terminals from translating wheel
-            // scroll into arrow-key escape codes; just ignore mouse input.
-            Event::Mouse(MouseEvent { .. }) => {}
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if !handle_key(key.code, &mut screen, &mut world, &mut binds, &config_path) {
-                    return Ok(());
+        // Drain every already-buffered event before rendering again. Holding
+        // a key generates OS key-repeat events faster than we can draw; if we
+        // rendered once per event, movement would keep "catching up" after
+        // release, feeling like the key was stuck. Applying a whole backlog
+        // between renders keeps input and display in sync.
+        loop {
+            match event::read()? {
+                Event::Resize(_, _) => {}
+                Event::Mouse(MouseEvent { .. }) => {}
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if !handle_key(key.code, &mut screen, &mut world, &mut binds, &config_path) {
+                        return Ok(());
+                    }
                 }
+                _ => {}
             }
-            _ => {}
+            if !event::poll(std::time::Duration::from_secs(0))? {
+                break;
+            }
         }
     }
 }

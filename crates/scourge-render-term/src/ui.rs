@@ -3,12 +3,12 @@
 //! flicker on every move.
 
 use ratatui::layout::{Constraint, Direction as LayoutDirection, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use scourge_core::{Direction, Tile, VisibleSet, World};
+use scourge_core::{Direction, Tile, TileColor, VisibleSet, World};
 use scourge_render::{Camera, Explored};
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
@@ -74,50 +74,62 @@ pub fn draw(
     }
 }
 
-/// One visible cell: its glyph, and whether it's in current line-of-sight
-/// (full brightness) or only remembered (dimmed).
-fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> (char, bool) {
+/// Maps our backend-agnostic terrain color to ratatui's. Deliberately the
+/// basic ANSI 16, not RGB - bare tty consoles generally only have those.
+fn ratatui_color(c: TileColor) -> Color {
+    match c {
+        TileColor::Default => Color::Reset,
+        TileColor::Gray => Color::Gray,
+        TileColor::Yellow => Color::Yellow,
+        TileColor::Cyan => Color::Cyan,
+        TileColor::Green => Color::Green,
+        TileColor::Blue => Color::Blue,
+    }
+}
+
+/// One visible cell: its glyph and style. Three tiers, from a single scan of
+/// line-of-sight and memory: bright (near, currently visible), dimmed (far
+/// but still visible - an approximation of graduated light falloff), and
+/// flat gray (remembered but not currently visible - classic roguelike
+/// "memory" convention, distinct from the tile's live color on purpose).
+fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> (char, Style) {
     if x == world.player.pos.x && y == world.player.pos.y {
-        return ('@', true);
+        return ('@', Style::default().fg(Color::LightYellow));
     }
     if visible.is_visible(x, y) {
         let (dx, dy) = (x - world.player.pos.x, y - world.player.pos.y);
         let near = dx * dx + dy * dy <= NEAR_RADIUS * NEAR_RADIUS;
-        (world.map.glyph_at(x, y), near)
+        let style = Style::default().fg(ratatui_color(world.map.color_at(x, y)));
+        let style = if near { style } else { style.add_modifier(Modifier::DIM) };
+        (world.map.glyph_at(x, y), style)
     } else if explored.is_seen(x, y) {
-        (world.map.glyph_at(x, y), false)
+        (world.map.glyph_at(x, y), Style::default().fg(Color::DarkGray))
     } else {
-        (' ', false)
+        (' ', Style::default())
     }
 }
 
 /// Builds one row as styled spans, grouping consecutive same-style cells so
 /// a normal move only touches a handful of runs, not one span per character.
-fn build_row(cells: impl Iterator<Item = (char, bool)>) -> Line<'static> {
+fn build_row(cells: impl Iterator<Item = (char, Style)>) -> Line<'static> {
     let mut spans = Vec::new();
     let mut current = String::new();
-    let mut current_visible = true;
-    for (ch, visible) in cells {
-        if current.is_empty() {
-            current_visible = visible;
-        } else if visible != current_visible {
-            spans.push(span_for(std::mem::take(&mut current), current_visible));
-            current_visible = visible;
+    let mut current_style = Style::default();
+    let mut started = false;
+    for (ch, style) in cells {
+        if !started {
+            current_style = style;
+            started = true;
+        } else if style != current_style {
+            spans.push(Span::styled(std::mem::take(&mut current), current_style));
+            current_style = style;
         }
         current.push(ch);
     }
     if !current.is_empty() {
-        spans.push(span_for(current, current_visible));
+        spans.push(Span::styled(current, current_style));
     }
     Line::from(spans)
-}
-
-fn span_for(text: String, visible: bool) -> Span<'static> {
-    if visible {
-        Span::raw(text)
-    } else {
-        Span::styled(text, Style::default().add_modifier(Modifier::DIM))
-    }
 }
 
 fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &mut Explored, visible: &VisibleSet) {
@@ -177,7 +189,7 @@ fn draw_look(frame: &mut Frame, world: &World, explored: &Explored, visible: &Vi
             build_row((0..viewport_w).map(|screen_x| {
                 let world_x = cam_x + screen_x;
                 if world_x == cursor_x && world_y == cursor_y {
-                    ('X', true)
+                    ('X', Style::default().add_modifier(Modifier::REVERSED))
                 } else {
                     cell(world, explored, visible, world_x, world_y)
                 }
@@ -206,12 +218,14 @@ fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i3
     }
     match world.map.tile(x, y) {
         Some(Tile::Floor) => "floor",
+        Some(Tile::Dirt) => "dirt",
         Some(Tile::Wall) => "a wall",
         Some(Tile::DoorClosed) => "a closed door",
         Some(Tile::DoorOpen) => "an open door",
         Some(Tile::Window { open: true, .. }) => "an open window",
         Some(Tile::Window { open: false, curtain_open: true }) => "a window",
         Some(Tile::Window { open: false, curtain_open: false }) => "a curtained window",
+        Some(Tile::BlueberryBush) => "a blueberry bush",
         None => "unknown",
     }
 }
@@ -232,19 +246,16 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x:
     let lines: Vec<Line> = (0..viewport_h)
         .map(|screen_y| {
             let world_y = cam_y + screen_y;
-            let row: String = (0..viewport_w)
-                .map(|screen_x| {
-                    let world_x = cam_x + screen_x;
-                    if world_x == world.player.pos.x && world_y == world.player.pos.y {
-                        '@'
-                    } else if explored.is_seen(world_x, world_y) {
-                        world.map.glyph_at(world_x, world_y)
-                    } else {
-                        ' '
-                    }
-                })
-                .collect();
-            Line::raw(row)
+            build_row((0..viewport_w).map(|screen_x| {
+                let world_x = cam_x + screen_x;
+                if world_x == world.player.pos.x && world_y == world.player.pos.y {
+                    ('@', Style::default().fg(Color::LightYellow))
+                } else if explored.is_seen(world_x, world_y) {
+                    (world.map.glyph_at(world_x, world_y), Style::default().fg(Color::DarkGray))
+                } else {
+                    (' ', Style::default())
+                }
+            }))
         })
         .collect();
     frame.render_widget(
