@@ -3,7 +3,13 @@
 use rand::Rng;
 use scourge_core::{Map, Tile};
 
-/// Generates a simple bordered room with scattered interior obstacles.
+/// Fixed placeholder world size - much larger than any terminal, so the
+/// camera actually has room to scroll. Chunk-based/effectively-infinite
+/// generation is future work; this is just enough to make scrolling real.
+pub const MAP_WIDTH: i32 = 200;
+pub const MAP_HEIGHT: i32 = 200;
+
+/// Generates a simple bordered area with scattered interior obstacles.
 /// Placeholder for real mapgen - just enough to make walkable/blocked terrain real.
 pub fn generate(width: i32, height: i32) -> Map {
     let mut map = Map::new(width, height, Tile::Floor);

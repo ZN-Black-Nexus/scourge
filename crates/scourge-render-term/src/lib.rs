@@ -8,13 +8,14 @@ use std::io;
 use std::path::PathBuf;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEvent};
-use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, ExecutableCommand};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use keybindings::{arrow_action, KeyBindings, DIRECTIONS};
 use scourge_core::World;
+use scourge_render::Camera;
 use ui::Screen;
 
 /// Restores the terminal on drop, including on panic, so a crash doesn't leave the user's shell broken.
@@ -47,31 +48,23 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn playable_size() -> io::Result<(i32, i32)> {
-    let (cols, rows) = terminal::size()?;
-    Ok((cols.max(1) as i32, rows.saturating_sub(1).max(1) as i32))
-}
-
 pub fn run(mut world: World) -> io::Result<()> {
     let _guard = TerminalGuard::new()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     let config_path = PathBuf::from("config/keybindings.json");
     let mut binds = KeyBindings::load(&config_path).unwrap_or_else(|_| KeyBindings::preset_vi());
-
-    let (w, h) = playable_size()?;
-    world.set_map(scourge_world::generate(w, h));
+    let mut camera = Camera::new();
 
     let mut screen = Screen::Game;
 
     loop {
-        terminal.draw(|frame| ui::draw(frame, &world, &screen, &binds))?;
+        terminal.draw(|frame| ui::draw(frame, &world, &screen, &binds, &mut camera))?;
 
         match event::read()? {
-            Event::Resize(cols, rows) => {
-                let (w, h) = (cols.max(1) as i32, rows.saturating_sub(1).max(1) as i32);
-                world.set_map(scourge_world::generate(w, h));
-            }
+            // The map is a fixed persistent world now, not regenerated per
+            // screen size, so a resize just needs a redraw (next loop turn).
+            Event::Resize(_, _) => {}
             // Enabling mouse capture stops terminals from translating wheel
             // scroll into arrow-key escape codes; just ignore mouse input.
             Event::Mouse(MouseEvent { .. }) => {}

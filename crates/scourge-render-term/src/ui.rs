@@ -9,8 +9,13 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use scourge_core::{Direction, Tile, World};
+use scourge_render::Camera;
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
+
+/// DDA-style scroll deadzone: the camera only shifts once the player gets
+/// this close to the current viewport's edge.
+const SCROLL_MARGIN: i32 = 5;
 
 pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
 pub const SETTINGS_ITEMS: [&str; 3] = [
@@ -27,8 +32,8 @@ pub enum Screen {
     AwaitingKey { direction: Direction },
 }
 
-pub fn draw(frame: &mut Frame, world: &World, screen: &Screen, binds: &KeyBindings) {
-    draw_game(frame, world);
+pub fn draw(frame: &mut Frame, world: &World, screen: &Screen, binds: &KeyBindings, camera: &mut Camera) {
+    draw_game(frame, world, camera);
     match screen {
         Screen::Game => {}
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
@@ -38,18 +43,34 @@ pub fn draw(frame: &mut Frame, world: &World, screen: &Screen, binds: &KeyBindin
     }
 }
 
-fn draw_game(frame: &mut Frame, world: &World) {
+fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera) {
     let area = frame.area();
     let map_height = area.height.saturating_sub(1);
+    let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
 
-    let lines: Vec<Line> = (0..world.map.height)
-        .map(|y| {
-            let row: String = (0..world.map.width)
-                .map(|x| {
-                    if x == world.player.pos.x && y == world.player.pos.y {
+    camera.update(
+        world.player.pos,
+        viewport_w,
+        viewport_h,
+        world.map.width,
+        world.map.height,
+        SCROLL_MARGIN,
+    );
+
+    let lines: Vec<Line> = (0..viewport_h)
+        .map(|screen_y| {
+            let world_y = camera.y + screen_y;
+            let row: String = (0..viewport_w)
+                .map(|screen_x| {
+                    let world_x = camera.x + screen_x;
+                    if world_x == world.player.pos.x && world_y == world.player.pos.y {
                         '@'
                     } else {
-                        world.map.tile(x, y).map(Tile::glyph).unwrap_or(' ')
+                        world
+                            .map
+                            .tile(world_x, world_y)
+                            .map(Tile::glyph)
+                            .unwrap_or(' ')
                     }
                 })
                 .collect();
