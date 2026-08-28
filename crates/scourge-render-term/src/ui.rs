@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use scourge_core::{Direction, VisibleSet, World};
+use scourge_core::{Direction, Tile, VisibleSet, World};
 use scourge_render::{Camera, Explored};
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
@@ -29,6 +29,10 @@ pub const SETTINGS_ITEMS: [&str; 3] = [
 
 pub enum Screen {
     Game,
+    /// Free-look cursor: uses your character's real current sight (not
+    /// memory-only like the map screen), lets you inspect anything within
+    /// it even off the normal viewport, without moving or costing a turn.
+    Look { cursor_x: i32, cursor_y: i32 },
     /// Birds-eye view of everything explored so far, pannable independently
     /// of the player - `cam_x`/`cam_y` are the top-left world coordinate.
     Map { cam_x: i32, cam_y: i32 },
@@ -48,11 +52,14 @@ pub fn draw(
     visible: &VisibleSet,
 ) {
     match screen {
+        Screen::Look { cursor_x, cursor_y } => {
+            draw_look(frame, world, explored, visible, *cursor_x, *cursor_y)
+        }
         Screen::Map { cam_x, cam_y } => draw_map_screen(frame, world, explored, *cam_x, *cam_y),
         _ => draw_game(frame, world, camera, explored, visible),
     }
     match screen {
-        Screen::Game | Screen::Map { .. } => {}
+        Screen::Game | Screen::Look { .. } | Screen::Map { .. } => {}
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
@@ -139,6 +146,61 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &m
         Paragraph::new(status),
         Rect::new(0, map_height, area.width, 1),
     );
+}
+
+/// 'x': free-look cursor. Camera centers on the cursor instead of the
+/// player so it can wander beyond the normal viewport - this is how a
+/// sight radius larger than the screen becomes actually useful, matching
+/// DDA's look-around. Rendering still uses the player's real `visible`/
+/// `explored` data (you're looking with your own eyes, not omniscient),
+/// movement keys move the cursor instead of stepping the world.
+fn draw_look(frame: &mut Frame, world: &World, explored: &Explored, visible: &VisibleSet, cursor_x: i32, cursor_y: i32) {
+    let area = frame.area();
+    let map_height = area.height.saturating_sub(1);
+    let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
+
+    let cam_x = (cursor_x - viewport_w / 2).clamp(0, (world.map.width - viewport_w).max(0));
+    let cam_y = (cursor_y - viewport_h / 2).clamp(0, (world.map.height - viewport_h).max(0));
+
+    let lines: Vec<Line> = (0..viewport_h)
+        .map(|screen_y| {
+            let world_y = cam_y + screen_y;
+            build_row((0..viewport_w).map(|screen_x| {
+                let world_x = cam_x + screen_x;
+                if world_x == cursor_x && world_y == cursor_y {
+                    ('X', true)
+                } else {
+                    cell(world, explored, visible, world_x, world_y)
+                }
+            }))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect::new(0, 0, area.width, map_height),
+    );
+
+    let what = describe_tile(world, explored, visible, cursor_x, cursor_y);
+    let status = format!("Look: {what} - move to look around, Esc to return");
+    frame.render_widget(
+        Paragraph::new(status),
+        Rect::new(0, map_height, area.width, 1),
+    );
+}
+
+fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> &'static str {
+    if x == world.player.pos.x && y == world.player.pos.y {
+        return "yourself";
+    }
+    if !visible.is_visible(x, y) && !explored.is_seen(x, y) {
+        return "unknown";
+    }
+    match world.map.tile(x, y) {
+        Some(Tile::Floor) => "floor",
+        Some(Tile::Wall) => "a wall",
+        Some(Tile::Door) => "a door",
+        None => "unknown",
+    }
 }
 
 /// The 'm' overview: a birds-eye view of everything explored so far,

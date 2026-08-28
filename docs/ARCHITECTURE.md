@@ -77,6 +77,27 @@ Content packs live under `mods/<mod-name>/` as JSON, loaded by
 content mod — the engine and mod-loading support it, but explicit text and
 descriptions are authored by hand, not generated.
 
+**Scripted mods (planned, not built): WASM, not a bundled scripting
+language.** Rather than embedding one interpreter (Lua, JS, Python) and
+locking mod authors into it, host a WASM runtime (`wasmtime` is the
+obvious pure-Rust choice) and define a stable host-function ABI. Any
+language with a WASM target can then write mods: Rust, C, C++, Zig, and
+AssemblyScript compile to WASM directly and natively; Lua/JS/Python are
+still reachable by bundling a small interpreter *for that language*
+compiled to WASM inside the mod itself (e.g. a Lua-in-WASM runtime, or
+QuickJS-wasm) — genuinely "any language," but not all equally cheap: a
+Rust mod's wasm binary is tiny, a Python-based one drags its whole
+interpreter along and will be much larger and slower to start. WASM
+sandboxing is also a real safety win for distributing untrusted community
+mods — a mod can't touch the filesystem or network unless a host function
+explicitly allows it.
+
+The hard part is the ABI itself: what data crosses the boundary and how
+(JSON/bincode blobs through linear memory vs. the still-maturing WASM
+Component Model for typed interop). Deliberately not designed yet — there's
+no real game data/systems for an API to expose until items, entities, and
+actions actually exist. Revisit once there's something worth scripting.
+
 Planned repo split (not set up yet): the main engine/game source stays on
 GitHub, but the NSFW mod's content will likely live in a separate repo
 hosted on GitGud.io or the user's own site, keeping explicit content off

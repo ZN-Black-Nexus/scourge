@@ -113,10 +113,24 @@ fn handle_key(
                 let cam_x = (world.player.pos.x - vw / 2).clamp(0, (world.map.width - vw).max(0));
                 let cam_y = (world.player.pos.y - vh / 2).clamp(0, (world.map.height - vh).max(0));
                 *screen = Screen::Map { cam_x, cam_y };
+            } else if code == KeyCode::Char('x') {
+                *screen = Screen::Look {
+                    cursor_x: world.player.pos.x,
+                    cursor_y: world.player.pos.y,
+                };
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 if !world.step(action) {
                     return false;
                 }
+            }
+        }
+        Screen::Look { cursor_x, cursor_y } => {
+            if code == KeyCode::Esc {
+                *screen = Screen::Game;
+            } else if let Some(Action::Move(dir)) = binds.resolve(code).or_else(|| arrow_action(code)) {
+                let (dx, dy) = direction_delta(dir);
+                *cursor_x = (*cursor_x + dx).clamp(0, world.map.width - 1);
+                *cursor_y = (*cursor_y + dy).clamp(0, world.map.height - 1);
             }
         }
         Screen::Map { cam_x, cam_y } => {
