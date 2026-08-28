@@ -60,7 +60,7 @@ pub fn run(mut world: World) -> io::Result<()> {
     let mut binds = KeyBindings::load(&config_path).unwrap_or_else(|_| KeyBindings::preset_vi());
 
     let (w, h) = playable_size()?;
-    world.resize(w, h);
+    world.set_map(scourge_world::generate(w, h));
 
     let mut screen = Screen::Game;
 
@@ -69,7 +69,8 @@ pub fn run(mut world: World) -> io::Result<()> {
 
         match event::read()? {
             Event::Resize(cols, rows) => {
-                world.resize(cols.max(1) as i32, rows.saturating_sub(1).max(1) as i32);
+                let (w, h) = (cols.max(1) as i32, rows.saturating_sub(1).max(1) as i32);
+                world.set_map(scourge_world::generate(w, h));
             }
             // Enabling mouse capture stops terminals from translating wheel
             // scroll into arrow-key escape codes; just ignore mouse input.

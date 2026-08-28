@@ -7,6 +7,7 @@ edition.workspace = true
 scourge-core = { path = "../scourge-core" }
 scourge-input = { path = "../scourge-input" }
 scourge-render = { path = "../scourge-render" }
+scourge-world = { path = "../scourge-world" }
 crossterm = { version = "0.28", features = ["serde"] }
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }

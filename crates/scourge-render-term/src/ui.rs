@@ -8,7 +8,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use scourge_core::{Direction, World};
+use scourge_core::{Direction, Tile, World};
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
 
@@ -42,14 +42,14 @@ fn draw_game(frame: &mut Frame, world: &World) {
     let area = frame.area();
     let map_height = area.height.saturating_sub(1);
 
-    let lines: Vec<Line> = (0..world.height)
+    let lines: Vec<Line> = (0..world.map.height)
         .map(|y| {
-            let row: String = (0..world.width)
+            let row: String = (0..world.map.width)
                 .map(|x| {
                     if x == world.player.pos.x && y == world.player.pos.y {
                         '@'
                     } else {
-                        '.'
+                        world.map.tile(x, y).map(Tile::glyph).unwrap_or(' ')
                     }
                 })
                 .collect();

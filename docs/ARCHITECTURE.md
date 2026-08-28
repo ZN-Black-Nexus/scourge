@@ -82,3 +82,12 @@ descriptions are authored by hand, not generated.
 - Tile/graphical rendering backend
 - Controller support
 - Real-time (non-turn-based) mode as an opt-in mod
+- Bare Linux tty sessions typically only have a small built-in console font
+  (not full Unicode), so extended glyphs may not render there even though
+  they work fine in a real terminal emulator. Possible future idea: a build
+  flag that embeds a bitmap/PSF font with the needed glyphs directly in the
+  binary, for the tty case specifically, instead of relying on whatever font
+  the system currently has loaded. Not investigated yet - needs research
+  into how (or whether) a userspace program can get the Linux console to use
+  a custom font without root/`setfont`, and what framebuffer console
+  limitations apply.
