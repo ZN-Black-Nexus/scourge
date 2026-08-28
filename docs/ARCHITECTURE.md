@@ -70,6 +70,17 @@ implementing, but this is the current plan:
   ~16): most players won't be colocated at once, so this is many small,
   cheap, mostly-independent groups rather than one global lockstep.
 
+## Settings UX (planned, not built yet)
+
+DDA-inspired tiering for options, once there are enough real settings to
+justify it: **basic** (common toggles, in-game menu), **advanced** (the
+full option set, still in-game), **expert** (hand-edit the config file
+directly — no UI needed for these). Not building Basic/Advanced menu
+screens yet: right now the only real setting is keybindings, and splitting
+one Settings screen into two empty-feeling tabs would be scaffolding with
+nothing to differentiate. Revisit once there are enough independent
+settings (display, gameplay, etc.) for the tiers to mean something.
+
 ## Mods
 
 Content packs live under `mods/<mod-name>/` as JSON, loaded by

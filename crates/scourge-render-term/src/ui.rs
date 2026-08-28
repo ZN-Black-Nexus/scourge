@@ -20,6 +20,13 @@ use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
 /// number. Doesn't yet vary with light level or a perception stat.
 pub(crate) const SIGHT_RADIUS: i32 = 60;
 
+/// Tiles farther than this (but still within line of sight) render dimmed
+/// rather than full-brightness - a rough stand-in for DDA's actual graduated
+/// light-level falloff, which we don't model yet (no light sources, time of
+/// day, or perception stat). Without that, "visible" was a hard on/off edge,
+/// which reads as flatter/less natural than DDA's real vision.
+const NEAR_RADIUS: i32 = 20;
+
 pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
 pub const SETTINGS_ITEMS: [&str; 3] = [
     "Movement: Vi-keys (hjkl + yubn)",
@@ -74,7 +81,9 @@ fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32
         return ('@', true);
     }
     if visible.is_visible(x, y) {
-        (world.map.glyph_at(x, y), true)
+        let (dx, dy) = (x - world.player.pos.x, y - world.player.pos.y);
+        let near = dx * dx + dy * dy <= NEAR_RADIUS * NEAR_RADIUS;
+        (world.map.glyph_at(x, y), near)
     } else if explored.is_seen(x, y) {
         (world.map.glyph_at(x, y), false)
     } else {
@@ -198,7 +207,11 @@ fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i3
     match world.map.tile(x, y) {
         Some(Tile::Floor) => "floor",
         Some(Tile::Wall) => "a wall",
-        Some(Tile::Door) => "a door",
+        Some(Tile::DoorClosed) => "a closed door",
+        Some(Tile::DoorOpen) => "an open door",
+        Some(Tile::Window { open: true, .. }) => "an open window",
+        Some(Tile::Window { open: false, curtain_open: true }) => "a window",
+        Some(Tile::Window { open: false, curtain_open: false }) => "a curtained window",
         None => "unknown",
     }
 }

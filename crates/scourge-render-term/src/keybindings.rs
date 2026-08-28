@@ -66,10 +66,11 @@ impl KeyBindings {
     }
 
     fn from_pairs(pairs: &[(KeyCode, Direction)]) -> Self {
-        let bindings = pairs
-            .iter()
-            .map(|(k, d)| (*k, Action::Move(*d)))
-            .collect();
+        let mut bindings: HashMap<KeyCode, Action> =
+            pairs.iter().map(|(k, d)| (*k, Action::Move(*d))).collect();
+        // 'o' (open/interact) is shared by both presets - it's not a letter
+        // either movement scheme uses, and matches real DDA's own binding.
+        bindings.insert(KeyCode::Char('o'), Action::Interact);
         KeyBindings { bindings }
     }
 

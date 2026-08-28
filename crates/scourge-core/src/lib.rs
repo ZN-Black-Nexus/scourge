@@ -34,6 +34,10 @@ pub fn direction_delta(dir: Direction) -> (i32, i32) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Move(Direction),
+    /// Opens/closes whatever's adjacent (a door, a window's sash, a
+    /// curtain) without needing to bump into it. Auto-targets the first
+    /// interactable neighbor found; no multi-target picker yet.
+    Interact,
     Quit,
 }
 
@@ -42,19 +46,35 @@ pub enum Action {
 pub enum Tile {
     Floor,
     Wall,
-    Door,
+    DoorClosed,
+    DoorOpen,
+    /// `open` (the sash/glass) governs walkability; `curtain_open` governs
+    /// whether you can see through it. The two are intentionally
+    /// independent - closing curtains doesn't stop you walking through an
+    /// open window, and an open window doesn't imply the curtain's aside.
+    Window { open: bool, curtain_open: bool },
 }
 
 impl Tile {
     pub fn is_walkable(self) -> bool {
-        matches!(self, Tile::Floor | Tile::Door)
+        matches!(self, Tile::Floor | Tile::DoorOpen | Tile::Window { open: true, .. })
+    }
+
+    pub fn is_transparent(self) -> bool {
+        !matches!(
+            self,
+            Tile::Wall | Tile::DoorClosed | Tile::Window { curtain_open: false, .. }
+        )
     }
 
     pub fn glyph(self) -> char {
         match self {
             Tile::Floor => '.',
             Tile::Wall => '#',
-            Tile::Door => '+',
+            Tile::DoorClosed => '+',
+            Tile::DoorOpen => '\'',
+            Tile::Window { open: true, .. } => '_',
+            Tile::Window { open: false, .. } => '"',
         }
     }
 }
@@ -97,7 +117,7 @@ impl Map {
     }
 
     pub fn transparent(&self, x: i32, y: i32) -> bool {
-        !matches!(self.tile(x, y), Some(Tile::Wall))
+        self.tile(x, y).map(Tile::is_transparent).unwrap_or(true)
     }
 
     /// The glyph to draw at (x, y). Walls pick a Unicode box-drawing
@@ -280,19 +300,117 @@ impl World {
     }
 
     /// Applies one action. Returns false when the game should end. Bumping into an
-    /// impassable tile costs no turn, matching how DDA handles a blocked move.
+    /// impassable tile costs no turn, matching how DDA handles a blocked move -
+    /// except a closed door or window sash, which auto-opens instead (also
+    /// matching DDA), costing a turn but not moving you onto it yet.
     pub fn step(&mut self, action: Action) -> bool {
         match action {
             Action::Quit => return false,
             Action::Move(dir) => {
                 let (dx, dy) = direction_delta(dir);
                 let (nx, ny) = (self.player.pos.x + dx, self.player.pos.y + dy);
-                if self.map.tile(nx, ny).is_some_and(Tile::is_walkable) {
-                    self.player.pos = Pos { x: nx, y: ny };
-                    self.turn += 1;
+                match self.map.tile(nx, ny) {
+                    Some(Tile::DoorClosed) => {
+                        self.map.set(nx, ny, Tile::DoorOpen);
+                        self.turn += 1;
+                    }
+                    Some(Tile::Window { open: false, curtain_open }) => {
+                        self.map.set(nx, ny, Tile::Window { open: true, curtain_open });
+                        self.turn += 1;
+                    }
+                    Some(t) if t.is_walkable() => {
+                        self.player.pos = Pos { x: nx, y: ny };
+                        self.turn += 1;
+                    }
+                    _ => {}
                 }
             }
+            Action::Interact => self.interact(),
         }
         true
+    }
+
+    /// Toggles the first interactable neighbor: opens a closed door, opens a
+    /// closed window sash, or toggles a window's curtain if the sash is
+    /// already open. Fixed scan order, no way to pick among several yet.
+    fn interact(&mut self) {
+        const OFFSETS: [(i32, i32); 8] = [
+            (0, -1), (0, 1), (1, 0), (-1, 0),
+            (1, -1), (-1, -1), (1, 1), (-1, 1),
+        ];
+        for (dx, dy) in OFFSETS {
+            let (x, y) = (self.player.pos.x + dx, self.player.pos.y + dy);
+            let new_tile = match self.map.tile(x, y) {
+                Some(Tile::DoorClosed) => Some(Tile::DoorOpen),
+                Some(Tile::Window { open: false, curtain_open }) => {
+                    Some(Tile::Window { open: true, curtain_open })
+                }
+                Some(Tile::Window { open, curtain_open }) => {
+                    Some(Tile::Window { open, curtain_open: !curtain_open })
+                }
+                _ => None,
+            };
+            if let Some(tile) = new_tile {
+                self.map.set(x, y, tile);
+                self.turn += 1;
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bumping_a_closed_door_opens_it_but_does_not_move_you() {
+        let mut map = Map::new(3, 3, Tile::Floor);
+        map.set(2, 1, Tile::DoorClosed);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 1, y: 1 };
+
+        assert!(world.step(Action::Move(Direction::East)));
+        assert_eq!(world.player.pos, Pos { x: 1, y: 1 }, "should not step onto the door yet");
+        assert_eq!(world.map.tile(2, 1), Some(Tile::DoorOpen));
+        assert_eq!(world.turn, 1, "opening the door still costs a turn");
+
+        assert!(world.step(Action::Move(Direction::East)));
+        assert_eq!(world.player.pos, Pos { x: 2, y: 1 }, "now walks through the open door");
+        assert_eq!(world.turn, 2);
+    }
+
+    #[test]
+    fn interact_opens_a_window_then_toggles_its_curtain() {
+        let mut map = Map::new(3, 3, Tile::Floor);
+        map.set(2, 1, Tile::Window { open: false, curtain_open: true });
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 1, y: 1 };
+
+        world.step(Action::Interact);
+        assert_eq!(
+            world.map.tile(2, 1),
+            Some(Tile::Window { open: true, curtain_open: true }),
+            "first interact opens the sash"
+        );
+
+        world.step(Action::Interact);
+        assert_eq!(
+            world.map.tile(2, 1),
+            Some(Tile::Window { open: true, curtain_open: false }),
+            "second interact toggles the curtain since the sash is already open"
+        );
+        assert_eq!(world.turn, 2);
+    }
+
+    #[test]
+    fn closed_window_blocks_sight_only_when_curtain_is_closed() {
+        let mut map = Map::new(5, 1, Tile::Floor);
+        map.set(2, 0, Tile::Window { open: false, curtain_open: true });
+        assert!(map.transparent(2, 0));
+
+        map.set(2, 0, Tile::Window { open: false, curtain_open: false });
+        assert!(!map.transparent(2, 0));
+        assert!(!map.tile(2, 0).unwrap().is_walkable(), "closed sash still blocks movement");
     }
 }

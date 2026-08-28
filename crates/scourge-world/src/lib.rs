@@ -91,22 +91,38 @@ fn place_building(map: &mut Map, r: &Rect, rng: &mut impl Rng) {
         }
     }
 
+    // Doors generate closed - matches DDA, and lets the auto-open-on-bump
+    // behavior actually mean something instead of already being open.
+    let door = wall_point(r, rng);
+    map.set(door.0, door.1, Tile::DoorClosed);
+
+    if rng.gen_bool(0.7) {
+        place_window(map, r, rng, door);
+    }
+}
+
+/// A random point on the building's perimeter (not a corner).
+fn wall_point(r: &Rect, rng: &mut impl Rng) -> (i32, i32) {
     match rng.gen_range(0..4) {
-        0 => {
-            let x = rng.gen_range(r.x + 1..r.x + r.w - 1);
-            map.set(x, r.y, Tile::Door);
-        }
-        1 => {
-            let x = rng.gen_range(r.x + 1..r.x + r.w - 1);
-            map.set(x, r.y + r.h - 1, Tile::Door);
-        }
-        2 => {
-            let y = rng.gen_range(r.y + 1..r.y + r.h - 1);
-            map.set(r.x, y, Tile::Door);
-        }
-        _ => {
-            let y = rng.gen_range(r.y + 1..r.y + r.h - 1);
-            map.set(r.x + r.w - 1, y, Tile::Door);
+        0 => (rng.gen_range(r.x + 1..r.x + r.w - 1), r.y),
+        1 => (rng.gen_range(r.x + 1..r.x + r.w - 1), r.y + r.h - 1),
+        2 => (r.x, rng.gen_range(r.y + 1..r.y + r.h - 1)),
+        _ => (r.x + r.w - 1, rng.gen_range(r.y + 1..r.y + r.h - 1)),
+    }
+}
+
+/// Places a window (sash closed, curtains open) on a wall cell that isn't
+/// the door, retrying a few times rather than guaranteeing one.
+fn place_window(map: &mut Map, r: &Rect, rng: &mut impl Rng, avoid: (i32, i32)) {
+    for _ in 0..10 {
+        let point = wall_point(r, rng);
+        if point != avoid {
+            map.set(
+                point.0,
+                point.1,
+                Tile::Window { open: false, curtain_open: true },
+            );
+            return;
         }
     }
 }
@@ -121,9 +137,9 @@ mod tests {
 
         let door_count = (0..map.height)
             .flat_map(|y| (0..map.width).map(move |x| (x, y)))
-            .filter(|&(x, y)| map.tile(x, y) == Some(Tile::Door))
+            .filter(|&(x, y)| map.tile(x, y) == Some(Tile::DoorClosed))
             .count();
-        assert!(door_count > 0, "expected at least one building with a door");
+        assert!(door_count > 0, "expected at least one building with a closed door");
 
         let (cx, cy) = (map.width / 2, map.height / 2);
         for dy in -2..=2 {
