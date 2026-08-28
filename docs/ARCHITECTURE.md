@@ -77,6 +77,12 @@ Content packs live under `mods/<mod-name>/` as JSON, loaded by
 content mod — the engine and mod-loading support it, but explicit text and
 descriptions are authored by hand, not generated.
 
+Planned repo split (not set up yet): the main engine/game source stays on
+GitHub, but the NSFW mod's content will likely live in a separate repo
+hosted on GitGud.io or the user's own site, keeping explicit content off
+GitHub entirely. Nothing to build for this yet - just a hosting decision
+for whenever the NSFW mod actually exists.
+
 ## Future, explicitly out of scope for now
 
 - Tile/graphical rendering backend

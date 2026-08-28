@@ -68,25 +68,12 @@ impl Explored {
         self.index(x, y).map(|i| self.seen[i]).unwrap_or(false)
     }
 
-    fn mark_seen(&mut self, x: i32, y: i32) {
+    /// Marks a single tile as seen. Callers are expected to only mark tiles
+    /// actually in line of sight (see `scourge_core::Map::visible_from`),
+    /// not just within radius - otherwise "remembered" would leak through walls.
+    pub fn mark(&mut self, x: i32, y: i32) {
         if let Some(i) = self.index(x, y) {
             self.seen[i] = true;
         }
     }
-
-    /// Marks every tile within `radius` of `center` as seen (circular, not square).
-    pub fn reveal(&mut self, center: Pos, radius: i32) {
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                if dx * dx + dy * dy <= radius * radius {
-                    self.mark_seen(center.x + dx, center.y + dy);
-                }
-            }
-        }
-    }
-}
-
-pub fn within_radius(a: Pos, b: Pos, radius: i32) -> bool {
-    let (dx, dy) = (a.x - b.x, a.y - b.y);
-    dx * dx + dy * dy <= radius * radius
 }

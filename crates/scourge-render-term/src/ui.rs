@@ -8,14 +8,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use scourge_core::{Direction, Pos, Tile, World};
-use scourge_render::{within_radius, Camera, Explored};
+use scourge_core::{Direction, VisibleSet, World};
+use scourge_render::{Camera, Explored};
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
 
-/// How far the player can currently see. Doesn't yet account for light
-/// level, perception, or walls blocking line of sight - just distance.
-const SIGHT_RADIUS: i32 = 10;
+/// How far the player can see, before line-of-sight is even considered.
+/// This is meant to rarely be the binding constraint - DDA characters can
+/// typically see well past a normal terminal's width in daylight, so what
+/// actually limits view is walls (see `Map::visible_from`), not this
+/// number. Doesn't yet vary with light level or a perception stat.
+pub(crate) const SIGHT_RADIUS: i32 = 60;
 
 pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
 pub const SETTINGS_ITEMS: [&str; 3] = [
@@ -26,7 +29,9 @@ pub const SETTINGS_ITEMS: [&str; 3] = [
 
 pub enum Screen {
     Game,
-    Map,
+    /// Birds-eye view of everything explored so far, pannable independently
+    /// of the player - `cam_x`/`cam_y` are the top-left world coordinate.
+    Map { cam_x: i32, cam_y: i32 },
     Pause { selected: usize },
     Settings { selected: usize },
     CustomBinds { selected: usize },
@@ -40,13 +45,14 @@ pub fn draw(
     binds: &KeyBindings,
     camera: &mut Camera,
     explored: &mut Explored,
+    visible: &VisibleSet,
 ) {
     match screen {
-        Screen::Map => draw_map_screen(frame, world, explored),
-        _ => draw_game(frame, world, camera, explored),
+        Screen::Map { cam_x, cam_y } => draw_map_screen(frame, world, explored, *cam_x, *cam_y),
+        _ => draw_game(frame, world, camera, explored, visible),
     }
     match screen {
-        Screen::Game | Screen::Map => {}
+        Screen::Game | Screen::Map { .. } => {}
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
@@ -54,17 +60,16 @@ pub fn draw(
     }
 }
 
-/// One visible cell: its glyph, and whether it's in current view (full
-/// brightness) or only remembered (dimmed).
-fn cell(world: &World, explored: &Explored, x: i32, y: i32) -> (char, bool) {
+/// One visible cell: its glyph, and whether it's in current line-of-sight
+/// (full brightness) or only remembered (dimmed).
+fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> (char, bool) {
     if x == world.player.pos.x && y == world.player.pos.y {
         return ('@', true);
     }
-    let visible = within_radius(Pos { x, y }, world.player.pos, SIGHT_RADIUS);
-    if visible {
-        (world.map.tile(x, y).map(Tile::glyph).unwrap_or(' '), true)
+    if visible.is_visible(x, y) {
+        (world.map.glyph_at(x, y), true)
     } else if explored.is_seen(x, y) {
-        (world.map.tile(x, y).map(Tile::glyph).unwrap_or(' '), false)
+        (world.map.glyph_at(x, y), false)
     } else {
         (' ', false)
     }
@@ -99,18 +104,29 @@ fn span_for(text: String, visible: bool) -> Span<'static> {
     }
 }
 
-fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &mut Explored) {
+fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &mut Explored, visible: &VisibleSet) {
     let area = frame.area();
     let map_height = area.height.saturating_sub(1);
     let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
 
     camera.center_on(world.player.pos, viewport_w, viewport_h, world.map.width, world.map.height);
-    explored.reveal(world.player.pos, SIGHT_RADIUS);
+
+    // Only mark tiles actually within line of sight as explored - a cheap
+    // bounding-box pass, distinct from the (cached, more expensive) ray
+    // tracing that produced `visible` itself.
+    for dy in -SIGHT_RADIUS..=SIGHT_RADIUS {
+        for dx in -SIGHT_RADIUS..=SIGHT_RADIUS {
+            let (x, y) = (world.player.pos.x + dx, world.player.pos.y + dy);
+            if visible.is_visible(x, y) {
+                explored.mark(x, y);
+            }
+        }
+    }
 
     let lines: Vec<Line> = (0..viewport_h)
         .map(|screen_y| {
             let world_y = camera.y + screen_y;
-            build_row((0..viewport_w).map(|screen_x| cell(world, explored, camera.x + screen_x, world_y)))
+            build_row((0..viewport_w).map(|screen_x| cell(world, explored, visible, camera.x + screen_x, world_y)))
         })
         .collect();
     frame.render_widget(
@@ -125,16 +141,18 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &m
     );
 }
 
-/// The 'm' overview: everything explored so far around the player, ignoring
-/// current sight radius. Not yet scrollable/zoomed beyond the normal
-/// viewport - future work if the world grows large enough to need that.
-fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored) {
+/// The 'm' overview: a birds-eye view of everything explored so far,
+/// ignoring current line of sight, pannable with the normal movement keys
+/// independently of the player. This is a straightforward pannable replay
+/// of remembered tiles at 1:1 scale - real DDA's map screen is a separate,
+/// much coarser "overmap" layer (one symbol per ~24-tile chunk, showing
+/// terrain features like roads/forests/named buildings across a huge area)
+/// with its own generation and legend. That's a substantially bigger,
+/// separate system - a good candidate to design next, not implemented here.
+fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x: i32, cam_y: i32) {
     let area = frame.area();
     let map_height = area.height.saturating_sub(1);
     let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
-
-    let cam_x = (world.player.pos.x - viewport_w / 2).clamp(0, (world.map.width - viewport_w).max(0));
-    let cam_y = (world.player.pos.y - viewport_h / 2).clamp(0, (world.map.height - viewport_h).max(0));
 
     let lines: Vec<Line> = (0..viewport_h)
         .map(|screen_y| {
@@ -145,7 +163,7 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored) {
                     if world_x == world.player.pos.x && world_y == world.player.pos.y {
                         '@'
                     } else if explored.is_seen(world_x, world_y) {
-                        world.map.tile(world_x, world_y).map(Tile::glyph).unwrap_or(' ')
+                        world.map.glyph_at(world_x, world_y)
                     } else {
                         ' '
                     }
@@ -160,7 +178,7 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored) {
     );
 
     frame.render_widget(
-        Paragraph::new("Map - Esc to return"),
+        Paragraph::new("Map - move to look around, Esc to return"),
         Rect::new(0, map_height, area.width, 1),
     );
 }

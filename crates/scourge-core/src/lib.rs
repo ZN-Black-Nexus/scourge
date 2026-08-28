@@ -18,7 +18,7 @@ pub enum Direction {
     SouthWest,
 }
 
-fn direction_delta(dir: Direction) -> (i32, i32) {
+pub fn direction_delta(dir: Direction) -> (i32, i32) {
     match dir {
         Direction::North => (0, -1),
         Direction::South => (0, 1),
@@ -95,6 +95,135 @@ impl Map {
             self.tiles[i] = tile;
         }
     }
+
+    pub fn transparent(&self, x: i32, y: i32) -> bool {
+        !matches!(self.tile(x, y), Some(Tile::Wall))
+    }
+
+    /// The glyph to draw at (x, y). Walls pick a Unicode box-drawing
+    /// character based on which neighbors are also walls, so a building's
+    /// perimeter reads as a continuous outline instead of a field of '#'.
+    pub fn glyph_at(&self, x: i32, y: i32) -> char {
+        match self.tile(x, y) {
+            Some(Tile::Wall) => self.wall_glyph(x, y),
+            Some(other) => other.glyph(),
+            None => ' ',
+        }
+    }
+
+    fn wall_glyph(&self, x: i32, y: i32) -> char {
+        let is_wall = |dx: i32, dy: i32| self.tile(x + dx, y + dy) == Some(Tile::Wall);
+        let (n, s, e, w) = (is_wall(0, -1), is_wall(0, 1), is_wall(1, 0), is_wall(-1, 0));
+        match (n, s, e, w) {
+            (false, false, false, false) => '#',
+            (false, false, false, true) => '─',
+            (false, false, true, false) => '─',
+            (false, false, true, true) => '─',
+            (false, true, false, false) => '│',
+            (false, true, false, true) => '┐',
+            (false, true, true, false) => '┌',
+            (false, true, true, true) => '┬',
+            (true, false, false, false) => '│',
+            (true, false, false, true) => '┘',
+            (true, false, true, false) => '└',
+            (true, false, true, true) => '┴',
+            (true, true, false, false) => '│',
+            (true, true, false, true) => '┤',
+            (true, true, true, false) => '├',
+            (true, true, true, true) => '┼',
+        }
+    }
+
+    /// Tiles visible from `origin` within `radius`, accounting for walls
+    /// blocking line of sight. Approximate: traces a line to every tile in
+    /// range and stops it at the first opaque tile, rather than full
+    /// recursive shadowcasting - cheap and good enough for now, swappable
+    /// later without changing callers.
+    pub fn visible_from(&self, origin: Pos, radius: i32) -> VisibleSet {
+        let mut set = VisibleSet::new(origin, radius);
+        set.mark(origin.x, origin.y);
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy > radius * radius {
+                    continue;
+                }
+                for (x, y) in bresenham_line(origin.x, origin.y, origin.x + dx, origin.y + dy) {
+                    set.mark(x, y);
+                    if !self.transparent(x, y) {
+                        break;
+                    }
+                }
+            }
+        }
+        set
+    }
+}
+
+/// The result of `Map::visible_from`: which tiles are currently visible
+/// from a given point. A plain array indexed by offset from the origin,
+/// not a hash set - this gets recomputed often, so avoiding hashing matters.
+pub struct VisibleSet {
+    origin: Pos,
+    radius: i32,
+    side: i32,
+    cells: Vec<bool>,
+}
+
+impl VisibleSet {
+    fn new(origin: Pos, radius: i32) -> Self {
+        let side = 2 * radius + 1;
+        VisibleSet {
+            origin,
+            radius,
+            side,
+            cells: vec![false; (side * side) as usize],
+        }
+    }
+
+    fn local_index(&self, x: i32, y: i32) -> Option<usize> {
+        let (lx, ly) = (x - self.origin.x + self.radius, y - self.origin.y + self.radius);
+        if lx < 0 || ly < 0 || lx >= self.side || ly >= self.side {
+            None
+        } else {
+            Some((ly * self.side + lx) as usize)
+        }
+    }
+
+    fn mark(&mut self, x: i32, y: i32) {
+        if let Some(i) = self.local_index(x, y) {
+            self.cells[i] = true;
+        }
+    }
+
+    pub fn is_visible(&self, x: i32, y: i32) -> bool {
+        self.local_index(x, y).is_some_and(|i| self.cells[i])
+    }
+}
+
+fn bresenham_line(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
+    let mut points = Vec::new();
+    let (mut x, mut y) = (x0, y0);
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        points.push((x, y));
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+    points
 }
 
 pub struct Player {
