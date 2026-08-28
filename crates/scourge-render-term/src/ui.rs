@@ -36,6 +36,7 @@ pub const SETTINGS_ITEMS: [&str; 3] = [
 
 pub enum Screen {
     Game,
+    Inventory,
     /// Free-look cursor: uses your character's real current sight (not
     /// memory-only like the map screen), lets you inspect anything within
     /// it even off the normal viewport, without moving or costing a turn.
@@ -67,6 +68,7 @@ pub fn draw(
     }
     match screen {
         Screen::Game | Screen::Look { .. } | Screen::Map { .. } => {}
+        Screen::Inventory => draw_inventory(frame, world),
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
@@ -74,17 +76,70 @@ pub fn draw(
     }
 }
 
-/// Maps our backend-agnostic terrain color to ratatui's. Deliberately the
-/// basic ANSI 16, not RGB - bare tty consoles generally only have those.
-fn ratatui_color(c: TileColor) -> Color {
-    match c {
-        TileColor::Default => Color::Reset,
-        TileColor::Gray => Color::Gray,
-        TileColor::Yellow => Color::Yellow,
-        TileColor::Cyan => Color::Cyan,
-        TileColor::Green => Color::Green,
-        TileColor::Blue => Color::Blue,
+/// How rich a color palette the terminal can actually show, detected once
+/// per run (it can't change mid-session) from the environment - the same
+/// signals most terminal apps use: `COLORTERM=truecolor`/`24bit` for full
+/// RGB (Alacritty, kitty, iTerm2, most modern emulators default to this),
+/// `TERM` containing "256color" for the 256-color palette, otherwise the
+/// basic ANSI 16 - what a bare Linux tty console is generally limited to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorSupport {
+    TrueColor,
+    Ansi256,
+    Basic,
+}
+
+/// Pure classification, kept separate from reading the real environment so
+/// it's directly unit-testable without spawning a subprocess.
+fn classify_color_support(colorterm: Option<&str>, term: Option<&str>) -> ColorSupport {
+    if matches!(colorterm, Some("truecolor") | Some("24bit")) {
+        return ColorSupport::TrueColor;
     }
+    if term.is_some_and(|t| t.contains("256color")) {
+        return ColorSupport::Ansi256;
+    }
+    ColorSupport::Basic
+}
+
+fn color_support() -> ColorSupport {
+    static SUPPORT: std::sync::OnceLock<ColorSupport> = std::sync::OnceLock::new();
+    *SUPPORT.get_or_init(|| {
+        classify_color_support(
+            std::env::var("COLORTERM").ok().as_deref(),
+            std::env::var("TERM").ok().as_deref(),
+        )
+    })
+}
+
+/// Maps our backend-agnostic terrain color to the richest ratatui
+/// representation the terminal actually supports, falling back gracefully.
+fn ratatui_color(c: TileColor) -> Color {
+    match (color_support(), c) {
+        (_, TileColor::Default) => Color::Reset,
+        (ColorSupport::TrueColor, TileColor::White) => Color::Rgb(255, 255, 255),
+        (ColorSupport::TrueColor, TileColor::Gray) => Color::Rgb(150, 150, 150),
+        (ColorSupport::TrueColor, TileColor::Brown) => Color::Rgb(139, 90, 43),
+        (ColorSupport::TrueColor, TileColor::Cyan) => Color::Rgb(140, 220, 220),
+        (ColorSupport::TrueColor, TileColor::Green) => Color::Rgb(50, 150, 60),
+        (ColorSupport::TrueColor, TileColor::Blue) => Color::Rgb(70, 110, 220),
+        (ColorSupport::Ansi256, TileColor::White) => Color::Indexed(15),
+        (ColorSupport::Ansi256, TileColor::Gray) => Color::Indexed(248),
+        (ColorSupport::Ansi256, TileColor::Brown) => Color::Indexed(94),
+        (ColorSupport::Ansi256, TileColor::Cyan) => Color::Indexed(87),
+        (ColorSupport::Ansi256, TileColor::Green) => Color::Indexed(70),
+        (ColorSupport::Ansi256, TileColor::Blue) => Color::Indexed(69),
+        (ColorSupport::Basic, TileColor::White) => Color::White,
+        (ColorSupport::Basic, TileColor::Gray) => Color::Gray,
+        (ColorSupport::Basic, TileColor::Brown) => Color::Yellow,
+        (ColorSupport::Basic, TileColor::Cyan) => Color::Cyan,
+        (ColorSupport::Basic, TileColor::Green) => Color::Green,
+        (ColorSupport::Basic, TileColor::Blue) => Color::Blue,
+    }
+}
+
+/// The player glyph's color - white, like real DDA's `@`.
+fn player_color() -> Color {
+    ratatui_color(TileColor::White)
 }
 
 /// One visible cell: its glyph and style. Three tiers, from a single scan of
@@ -94,7 +149,7 @@ fn ratatui_color(c: TileColor) -> Color {
 /// "memory" convention, distinct from the tile's live color on purpose).
 fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> (char, Style) {
     if x == world.player.pos.x && y == world.player.pos.y {
-        return ('@', Style::default().fg(Color::LightYellow));
+        return ('@', Style::default().fg(player_color()));
     }
     if visible.is_visible(x, y) {
         let (dx, dy) = (x - world.player.pos.x, y - world.player.pos.y);
@@ -162,7 +217,7 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &m
         Rect::new(0, 0, area.width, map_height),
     );
 
-    let status = format!("turn {} - Esc for menu, m for map", world.turn);
+    let status = format!("turn {} - Esc:menu m:map x:look i:inventory g:get o/c:open/close", world.turn);
     frame.render_widget(
         Paragraph::new(status),
         Rect::new(0, map_height, area.width, 1),
@@ -209,24 +264,34 @@ fn draw_look(frame: &mut Frame, world: &World, explored: &Explored, visible: &Vi
     );
 }
 
-fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> &'static str {
-    if x == world.player.pos.x && y == world.player.pos.y {
-        return "yourself";
+fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> String {
+    let is_player = x == world.player.pos.x && y == world.player.pos.y;
+    if !is_player && !visible.is_visible(x, y) && !explored.is_seen(x, y) {
+        return "unknown".to_string();
     }
-    if !visible.is_visible(x, y) && !explored.is_seen(x, y) {
-        return "unknown";
-    }
-    match world.map.tile(x, y) {
-        Some(Tile::Floor) => "floor",
-        Some(Tile::Dirt) => "dirt",
-        Some(Tile::Wall) => "a wall",
-        Some(Tile::DoorClosed) => "a closed door",
-        Some(Tile::DoorOpen) => "an open door",
-        Some(Tile::Window { open: true, .. }) => "an open window",
-        Some(Tile::Window { open: false, curtain_open: true }) => "a window",
-        Some(Tile::Window { open: false, curtain_open: false }) => "a curtained window",
-        Some(Tile::BlueberryBush) => "a blueberry bush",
-        None => "unknown",
+    let terrain = if is_player {
+        "yourself"
+    } else {
+        match world.map.tile(x, y) {
+            Some(Tile::Floor) => "floor",
+            Some(Tile::Dirt) => "dirt",
+            Some(Tile::Grass) => "grass",
+            Some(Tile::Wall) => "a wall",
+            Some(Tile::DoorClosed) => "a closed door",
+            Some(Tile::DoorOpen) => "an open door",
+            Some(Tile::Window { open: true, .. }) => "an open window",
+            Some(Tile::Window { open: false, curtain_open: true }) => "a window",
+            Some(Tile::Window { open: false, curtain_open: false }) => "a curtained window",
+            Some(Tile::BlueberryBush) => "a blueberry bush",
+            None => "unknown",
+        }
+    };
+    match (world.items_at(x, y).len(), is_player) {
+        (0, _) => terrain.to_string(),
+        // Picking up only ever acts on the player's own tile, so only hint
+        // "g to pick up" when looking at yourself, not some other spot.
+        (n, true) => format!("{terrain} ({n} item(s) here, g to pick up)"),
+        (n, false) => format!("{terrain} ({n} item(s) here)"),
     }
 }
 
@@ -249,7 +314,7 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x:
             build_row((0..viewport_w).map(|screen_x| {
                 let world_x = cam_x + screen_x;
                 if world_x == world.player.pos.x && world_y == world.player.pos.y {
-                    ('@', Style::default().fg(Color::LightYellow))
+                    ('@', Style::default().fg(player_color()))
                 } else if explored.is_seen(world_x, world_y) {
                     (world.map.glyph_at(world_x, world_y), Style::default().fg(Color::DarkGray))
                 } else {
@@ -267,6 +332,32 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x:
         Paragraph::new("Map - move to look around, Esc to return"),
         Rect::new(0, map_height, area.width, 1),
     );
+}
+
+/// 'i': a DDA-style lettered item list. Minimal first pass - no weight,
+/// volume, categories, or containers yet (nothing to compute those from -
+/// items are just names right now); just enough to see what you're
+/// carrying, matching the look DDA's inventory screen is going for.
+fn draw_inventory(frame: &mut Frame, world: &World) {
+    let popup = centered_rect(70, 70, frame.area());
+    let title = format!("Inventory ({} items) - Esc to close", world.player.inventory.len());
+    let list_items: Vec<ListItem> = if world.player.inventory.is_empty() {
+        vec![ListItem::new("(nothing carried)")]
+    } else {
+        world
+            .player
+            .inventory
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let letter = (b'a' + (i as u8 % 26)) as char;
+                ListItem::new(format!("{letter} - {}", item.name))
+            })
+            .collect()
+    };
+    let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
 }
 
 fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {
@@ -341,4 +432,18 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_support_falls_back_correctly() {
+        assert_eq!(classify_color_support(Some("truecolor"), Some("xterm-256color")), ColorSupport::TrueColor);
+        assert_eq!(classify_color_support(Some("24bit"), None), ColorSupport::TrueColor);
+        assert_eq!(classify_color_support(None, Some("xterm-256color")), ColorSupport::Ansi256);
+        assert_eq!(classify_color_support(None, Some("linux")), ColorSupport::Basic, "bare tty console");
+        assert_eq!(classify_color_support(None, None), ColorSupport::Basic);
+    }
 }

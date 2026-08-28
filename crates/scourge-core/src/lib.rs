@@ -41,18 +41,21 @@ pub enum Action {
     /// sash, or (if the sash is already closed) closes its curtain.
     Close,
     Quit,
+    /// Picks up the topmost item on the player's current tile, if any.
+    PickUp,
 }
 
-/// Backend-agnostic terrain color. `scourge-core` has no rendering
-/// dependency, so this is just a small palette name - a renderer maps it to
-/// whatever color type it actually uses (see `scourge-render-term`).
-/// Deliberately limited to the basic ANSI 16 colors, not RGB/truecolor -
-/// bare Linux tty consoles typically only support that basic palette.
+/// Backend-agnostic terrain color name. `scourge-core` has no rendering
+/// dependency, so this is just a palette name - a renderer maps it to
+/// whatever color representation it actually supports, at whatever
+/// richness it can (truecolor, 256-color, or the basic ANSI 16 as a last
+/// resort for things like a bare Linux tty console).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TileColor {
     Default,
+    White,
     Gray,
-    Yellow,
+    Brown,
     Cyan,
     Green,
     Blue,
@@ -65,6 +68,8 @@ pub enum Tile {
     /// Outdoor ground, distinct from indoor `Floor` (same glyph, different
     /// color - real DDA often distinguishes similar terrain this way too).
     Dirt,
+    /// The dominant outdoor ground cover; Dirt appears in patches on top of it.
+    Grass,
     Wall,
     DoorClosed,
     DoorOpen,
@@ -73,7 +78,7 @@ pub enum Tile {
     /// independent - closing curtains doesn't stop you walking through an
     /// open window, and an open window doesn't imply the curtain's aside.
     Window { open: bool, curtain_open: bool },
-    /// Walkable but blocks sight, like real underbrush.
+    /// Blocks both movement and sight, like real dense underbrush.
     BlueberryBush,
 }
 
@@ -81,7 +86,7 @@ impl Tile {
     pub fn is_walkable(self) -> bool {
         matches!(
             self,
-            Tile::Floor | Tile::Dirt | Tile::DoorOpen | Tile::Window { open: true, .. } | Tile::BlueberryBush
+            Tile::Floor | Tile::Dirt | Tile::Grass | Tile::DoorOpen | Tile::Window { open: true, .. }
         )
     }
 
@@ -97,7 +102,7 @@ impl Tile {
 
     pub fn glyph(self) -> char {
         match self {
-            Tile::Floor | Tile::Dirt => '.',
+            Tile::Floor | Tile::Dirt | Tile::Grass => '.',
             Tile::Wall => '#',
             Tile::DoorClosed => '+',
             Tile::DoorOpen => '\'',
@@ -110,9 +115,10 @@ impl Tile {
     pub fn color(self) -> TileColor {
         match self {
             Tile::Floor => TileColor::Default,
-            Tile::Dirt => TileColor::Yellow,
+            Tile::Dirt => TileColor::Brown,
+            Tile::Grass => TileColor::Green,
             Tile::Wall => TileColor::Gray,
-            Tile::DoorClosed | Tile::DoorOpen => TileColor::Yellow,
+            Tile::DoorClosed | Tile::DoorOpen => TileColor::Brown,
             Tile::Window { .. } => TileColor::Cyan,
             Tile::BlueberryBush => TileColor::Blue,
         }
@@ -298,14 +304,24 @@ fn bresenham_line(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
     points
 }
 
+/// A minimal carryable/ground item - just a name for now. Real items (with
+/// weight/volume/containers, matching DDA's actual inventory model) are
+/// future work once there's a mod-data pipeline to define them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Item {
+    pub name: String,
+}
+
 pub struct Player {
     pub pos: Pos,
+    pub inventory: Vec<Item>,
 }
 
 pub struct World {
     pub map: Map,
     pub player: Player,
     pub turn: u64,
+    ground_items: std::collections::HashMap<(i32, i32), Vec<Item>>,
 }
 
 impl World {
@@ -314,11 +330,21 @@ impl World {
             map,
             player: Player {
                 pos: Pos { x: 0, y: 0 },
+                inventory: Vec::new(),
             },
             turn: 0,
+            ground_items: std::collections::HashMap::new(),
         };
         world.place_player_at_center();
         world
+    }
+
+    pub fn place_item(&mut self, x: i32, y: i32, item: Item) {
+        self.ground_items.entry((x, y)).or_default().push(item);
+    }
+
+    pub fn items_at(&self, x: i32, y: i32) -> &[Item] {
+        self.ground_items.get(&(x, y)).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Swaps in a freshly generated map (e.g. on terminal resize) and repositions the player.
@@ -397,6 +423,18 @@ impl World {
                 }
                 _ => None,
             }),
+            Action::PickUp => {
+                let key = (self.player.pos.x, self.player.pos.y);
+                if let Some(items) = self.ground_items.get_mut(&key) {
+                    if let Some(item) = items.pop() {
+                        self.player.inventory.push(item);
+                        self.turn += 1;
+                    }
+                    if items.is_empty() {
+                        self.ground_items.remove(&key);
+                    }
+                }
+            }
         }
         true
     }
@@ -422,6 +460,37 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blueberry_bushes_block_both_sight_and_movement() {
+        let mut map = Map::new(3, 3, Tile::Grass);
+        map.set(2, 1, Tile::BlueberryBush);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 1, y: 1 };
+
+        assert!(world.step(Action::Move(Direction::East)));
+        assert_eq!(world.player.pos, Pos { x: 1, y: 1 }, "bush blocks the step");
+        assert_eq!(world.turn, 0, "blocked bump costs no turn");
+        assert!(!world.map.transparent(2, 1), "bush also blocks sight");
+    }
+
+    #[test]
+    fn picking_up_moves_an_item_from_ground_to_inventory() {
+        let map = Map::new(3, 3, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 1, y: 1 };
+        world.place_item(1, 1, Item { name: "Rock".to_string() });
+
+        assert_eq!(world.items_at(1, 1).len(), 1);
+        world.step(Action::PickUp);
+        assert_eq!(world.player.inventory, vec![Item { name: "Rock".to_string() }]);
+        assert!(world.items_at(1, 1).is_empty());
+        assert_eq!(world.turn, 1);
+
+        // Picking up again with nothing there costs no turn.
+        world.step(Action::PickUp);
+        assert_eq!(world.turn, 1);
+    }
 
     #[test]
     fn a_corner_next_to_a_window_still_renders_as_a_corner() {

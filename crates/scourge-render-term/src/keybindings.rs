@@ -76,9 +76,11 @@ impl KeyBindings {
     fn from_pairs(pairs: &[(KeyCode, Direction)]) -> Self {
         let mut bindings: HashMap<KeyCode, Action> =
             pairs.iter().map(|(k, d)| (*k, Action::Move(*d))).collect();
-        // 'o' (open) is shared by both presets - it's not a letter either
-        // movement scheme uses, and matches real DDA's own binding.
+        // 'o' (open) and 'g' (get/pick up) are shared by both presets -
+        // neither is a letter either movement scheme uses, and both match
+        // real DDA's own bindings.
         bindings.insert(KeyCode::Char('o'), Action::Open);
+        bindings.insert(KeyCode::Char('g'), Action::PickUp);
         KeyBindings { bindings }
     }
 

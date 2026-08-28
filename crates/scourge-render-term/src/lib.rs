@@ -6,6 +6,7 @@ mod ui;
 
 use std::io;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEvent};
 use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -23,6 +24,59 @@ fn viewport_size() -> (i32, i32) {
     terminal::size()
         .map(|(cols, rows)| (cols.max(1) as i32, rows.saturating_sub(1).max(1) as i32))
         .unwrap_or((80, 24))
+}
+
+/// A legacy terminal can't tell a genuine second keypress apart from the OS
+/// auto-repeating a held key - both arrive as identical `Press` events. DDA
+/// requires spamming the key yourself; holding it down doesn't keep moving
+/// you. This approximates that: the same key arriving again faster than a
+/// deliberate human re-press plausibly could is treated as auto-repeat and
+/// dropped, so only the first press of a hold actually steps the world.
+const MOVE_REPEAT_THRESHOLD: Duration = Duration::from_millis(150);
+
+struct MoveRepeatGuard {
+    last: Option<(KeyCode, Instant)>,
+}
+
+impl MoveRepeatGuard {
+    fn new() -> Self {
+        MoveRepeatGuard { last: None }
+    }
+
+    fn allow(&mut self, code: KeyCode) -> bool {
+        self.allow_at(code, Instant::now())
+    }
+
+    fn allow_at(&mut self, code: KeyCode, now: Instant) -> bool {
+        let is_repeat = matches!(self.last, Some((last_code, at)) if last_code == code && now.duration_since(at) < MOVE_REPEAT_THRESHOLD);
+        self.last = Some((code, now));
+        !is_repeat
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suppresses_fast_repeats_but_allows_slow_ones_and_other_keys() {
+        let mut guard = MoveRepeatGuard::new();
+        let t0 = Instant::now();
+
+        assert!(guard.allow_at(KeyCode::Char('h'), t0), "first press always allowed");
+        assert!(
+            !guard.allow_at(KeyCode::Char('h'), t0 + Duration::from_millis(30)),
+            "same key 30ms later looks like OS auto-repeat, not a fresh press"
+        );
+        assert!(
+            guard.allow_at(KeyCode::Char('h'), t0 + Duration::from_millis(300)),
+            "same key 300ms later is a deliberate re-press"
+        );
+        assert!(
+            guard.allow_at(KeyCode::Char('l'), t0 + Duration::from_millis(310)),
+            "a different key right after is never suppressed"
+        );
+    }
 }
 
 /// Restores the terminal on drop, including on panic, so a crash doesn't leave the user's shell broken.
@@ -65,17 +119,22 @@ pub fn run(mut world: World) -> io::Result<()> {
     let mut explored = Explored::new(world.map.width, world.map.height);
 
     // Line-of-sight ray tracing is the expensive part - only recompute it
-    // when the player actually moves, not on every single draw (e.g. while
-    // just navigating a menu).
+    // when something actually happened (a move, or opening/closing a door -
+    // anything that changes the world costs a turn), not on every single
+    // draw while just navigating a menu. Keyed on the turn counter rather
+    // than just player position, since opening a door changes what's
+    // visible without moving the player at all - light should flood in the
+    // moment the door opens, not only once you've stepped through it.
     let mut visible = world.map.visible_from(world.player.pos, ui::SIGHT_RADIUS);
-    let mut last_vis_pos = world.player.pos;
+    let mut last_turn = world.turn;
 
     let mut screen = Screen::Game;
+    let mut move_guard = MoveRepeatGuard::new();
 
     loop {
-        if world.player.pos != last_vis_pos {
+        if world.turn != last_turn {
             visible = world.map.visible_from(world.player.pos, ui::SIGHT_RADIUS);
-            last_vis_pos = world.player.pos;
+            last_turn = world.turn;
         }
         terminal.draw(|frame| ui::draw(frame, &world, &screen, &binds, &mut camera, &mut explored, &visible))?;
 
@@ -89,13 +148,13 @@ pub fn run(mut world: World) -> io::Result<()> {
                 Event::Resize(_, _) => {}
                 Event::Mouse(MouseEvent { .. }) => {}
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if !handle_key(key.code, &mut screen, &mut world, &mut binds, &config_path) {
+                    if !handle_key(key.code, &mut screen, &mut world, &mut binds, &config_path, &mut move_guard) {
                         return Ok(());
                     }
                 }
                 _ => {}
             }
-            if !event::poll(std::time::Duration::from_secs(0))? {
+            if !event::poll(Duration::from_secs(0))? {
                 break;
             }
         }
@@ -109,6 +168,7 @@ fn handle_key(
     world: &mut World,
     binds: &mut KeyBindings,
     config_path: &std::path::Path,
+    move_guard: &mut MoveRepeatGuard,
 ) -> bool {
     match screen {
         Screen::Game => {
@@ -124,10 +184,21 @@ fn handle_key(
                     cursor_x: world.player.pos.x,
                     cursor_y: world.player.pos.y,
                 };
+            } else if code == KeyCode::Char('i') {
+                *screen = Screen::Inventory;
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
-                if !world.step(action) {
+                // Only movement requires the repeated-press discipline DDA
+                // has; opening doors, picking things up etc. aren't the
+                // "holding a direction" case this guards against.
+                let allowed = !matches!(action, Action::Move(_)) || move_guard.allow(code);
+                if allowed && !world.step(action) {
                     return false;
                 }
+            }
+        }
+        Screen::Inventory => {
+            if code == KeyCode::Esc {
+                *screen = Screen::Game;
             }
         }
         Screen::Look { cursor_x, cursor_y } => {
