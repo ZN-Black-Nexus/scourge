@@ -107,6 +107,13 @@ impl KeyBindings {
             .map(|(key, _)| *key)
     }
 
+    /// Reverse lookup for any non-movement action, e.g. for a help screen
+    /// that shows the current preset's actual key rather than a hardcoded
+    /// guess.
+    pub fn key_for_action(&self, action: Action) -> Option<KeyCode> {
+        self.bindings.iter().find(|(_, a)| **a == action).map(|(key, _)| *key)
+    }
+
     /// Rebinds `direction` to `key`, removing any prior key bound to it so
     /// each direction has exactly one custom letter binding.
     pub fn bind(&mut self, key: KeyCode, direction: Direction) {

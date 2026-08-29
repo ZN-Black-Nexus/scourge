@@ -18,6 +18,13 @@ pub enum Direction {
     SouthWest,
 }
 
+/// The 8 cell offsets surrounding a point, used by pickup/open/close to
+/// scan a player's immediate surroundings.
+const ADJACENT_OFFSETS: [(i32, i32); 8] = [
+    (0, -1), (0, 1), (1, 0), (-1, 0),
+    (1, -1), (-1, -1), (1, 1), (-1, 1),
+];
+
 pub fn direction_delta(dir: Direction) -> (i32, i32) {
     match dir {
         Direction::North => (0, -1),
@@ -669,15 +676,21 @@ impl World {
                 }
                 _ => None,
             }),
+            // Checks the player's own tile first, then the 8 adjacent ones -
+            // matches real DDA, which doesn't require standing exactly on
+            // an item to grab it.
             Action::PickUp => {
-                let key = (self.player.pos.x, self.player.pos.y);
-                let popped = self.ground_items.get_mut(&key).and_then(Vec::pop);
-                if let Some(item) = popped {
-                    self.player.inventory.push(item);
-                    self.tick();
-                }
-                if self.ground_items.get(&key).is_some_and(Vec::is_empty) {
-                    self.ground_items.remove(&key);
+                for (dx, dy) in std::iter::once((0, 0)).chain(ADJACENT_OFFSETS) {
+                    let key = (self.player.pos.x + dx, self.player.pos.y + dy);
+                    let popped = self.ground_items.get_mut(&key).and_then(Vec::pop);
+                    if let Some(item) = popped {
+                        self.player.inventory.push(item);
+                        self.tick();
+                        if self.ground_items.get(&key).is_some_and(Vec::is_empty) {
+                            self.ground_items.remove(&key);
+                        }
+                        break;
+                    }
                 }
             }
             // Never actually reaches here in normal play - the render layer
@@ -727,11 +740,7 @@ impl World {
     /// Applies `transition` to the first adjacent tile it has an answer for
     /// (fixed scan order, no way to pick among several candidates yet).
     fn toggle_nearby(&mut self, transition: impl Fn(Tile) -> Option<Tile>) {
-        const OFFSETS: [(i32, i32); 8] = [
-            (0, -1), (0, 1), (1, 0), (-1, 0),
-            (1, -1), (-1, -1), (1, 1), (-1, 1),
-        ];
-        for (dx, dy) in OFFSETS {
+        for (dx, dy) in ADJACENT_OFFSETS {
             let (x, y) = (self.player.pos.x + dx, self.player.pos.y + dy);
             if let Some(tile) = self.map.tile(x, y).and_then(&transition) {
                 self.map.set(x, y, tile);
@@ -913,6 +922,19 @@ mod tests {
 
         // Picking up again with nothing there costs no turn.
         world.step(Action::PickUp);
+        assert_eq!(world.turn, 1);
+    }
+
+    #[test]
+    fn picking_up_also_works_from_an_adjacent_tile() {
+        let map = Map::new(3, 3, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 1, y: 1 };
+        world.place_item(2, 1, Item::new("Rock")); // adjacent, not underfoot
+
+        world.step(Action::PickUp);
+        assert_eq!(world.player.inventory, vec![Item::new("Rock")]);
+        assert!(world.items_at(2, 1).is_empty());
         assert_eq!(world.turn, 1);
     }
 

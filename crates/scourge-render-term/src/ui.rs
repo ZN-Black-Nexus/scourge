@@ -8,10 +8,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use scourge_core::{Direction, Tile, TileColor, VisibleSet, World};
+use scourge_core::{Action, Direction, Tile, TileColor, VisibleSet, World};
 use scourge_render::{Camera, Explored};
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
+
+/// Right-side status panel width, DDA/BN's classic default sidebar
+/// arrangement instead of a single line of jammed-together info at the
+/// bottom of the screen.
+const SIDEBAR_WIDTH: u16 = 26;
 
 /// How far the player can see, before line-of-sight is even considered.
 /// This is meant to rarely be the binding constraint - DDA characters can
@@ -58,6 +63,9 @@ pub enum Screen {
     Settings { selected: usize },
     CustomBinds { selected: usize },
     AwaitingKey { direction: Direction },
+    /// '?': a keybind reference, dismissed by any key - built from the
+    /// current preset's actual bindings rather than a hardcoded guess.
+    Help,
 }
 
 pub fn draw(
@@ -87,6 +95,7 @@ pub fn draw(
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
         Screen::AwaitingKey { direction } => draw_awaiting_key(frame, *direction),
+        Screen::Help => draw_help(frame, binds),
     }
 }
 
@@ -224,11 +233,18 @@ fn build_row(cells: impl Iterator<Item = (char, Style)>) -> Line<'static> {
     Line::from(spans)
 }
 
+/// DDA/BN's classic default arrangement: a map viewport plus a persistent
+/// status sidebar, instead of the map alone with a single crammed line of
+/// info at the bottom.
 fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &mut Explored, visible: &VisibleSet) {
     let area = frame.area();
-    let map_height = area.height.saturating_sub(1);
-    let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
+    let columns = Layout::default()
+        .direction(LayoutDirection::Horizontal)
+        .constraints([Constraint::Min(20), Constraint::Length(SIDEBAR_WIDTH)])
+        .split(area);
+    let (map_area, sidebar_area) = (columns[0], columns[1]);
 
+    let (viewport_w, viewport_h) = (map_area.width as i32, map_area.height as i32);
     camera.center_on(world.player.pos, viewport_w, viewport_h, world.map.width, world.map.height);
 
     // Only mark tiles actually within line of sight as explored - a cheap
@@ -249,20 +265,38 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &m
             build_row((0..viewport_w).map(|screen_x| cell(world, explored, visible, camera.x + screen_x, world_y)))
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(lines),
-        Rect::new(0, 0, area.width, map_height),
-    );
+    frame.render_widget(Paragraph::new(lines), map_area);
 
+    draw_sidebar(frame, world, sidebar_area);
+}
+
+fn draw_sidebar(frame: &mut Frame, world: &World, area: Rect) {
     let (hp_current, hp_max) = world.player.health.total();
-    let status = format!(
-        "turn {} HP:{hp_current}/{hp_max} hunger:{} - Esc:menu m:map x:look i:inv g:get o/c:open/close (i for full body status)",
-        world.turn, world.player.hunger
-    );
-    frame.render_widget(
-        Paragraph::new(status),
-        Rect::new(0, map_height, area.width, 1),
-    );
+    let mut lines = vec![
+        Line::raw(format!("Turn {}", world.turn)),
+        Line::raw(format!("HP {hp_current}/{hp_max}")),
+        Line::raw(""),
+    ];
+    for (bp, part) in world.player.health.parts() {
+        let broken = if part.is_broken() { " !" } else { "" };
+        lines.push(Line::raw(format!("{:<6}{:>3}/{:<3}{}", bp.label(), part.current, part.max, broken)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(format!("Hunger {}/100", world.player.hunger)));
+    lines.push(Line::raw(""));
+    let stats = world.player.stats;
+    lines.push(Line::raw(format!("STR {}  DEX {}", stats.strength, stats.dexterity)));
+    lines.push(Line::raw(format!("INT {}  PER {}", stats.intelligence, stats.perception)));
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(match &world.player.wielded {
+        Some(item) => format!("Wield: {}", item.name),
+        None => "Wield: -".to_string(),
+    }));
+    lines.push(Line::raw(""));
+    lines.push(Line::raw("? for help"));
+
+    let block = Block::default().title("Scourge").borders(Borders::LEFT);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// 'x': free-look cursor. Camera centers on the cursor instead of the
@@ -402,27 +436,15 @@ fn inventory_letters(inventory: &[scourge_core::Item]) -> Vec<ListItem<'static>>
 /// One line per body part, e.g. "Torso: 60/60" - a broken (0 HP) limb is
 /// called out explicitly since that's a real gameplay state (disabled),
 /// not just a number.
-fn body_status_lines(world: &World) -> Vec<ListItem<'static>> {
-    world
-        .player
-        .health
-        .parts()
-        .into_iter()
-        .map(|(bp, part)| {
-            let text = format!("{}: {}/{}{}", bp.label(), part.current, part.max, if part.is_broken() { " (broken!)" } else { "" });
-            ListItem::new(text)
-        })
-        .collect()
-}
-
+/// Just items - body health lives permanently in the sidebar now, showing
+/// it again here would be redundant.
 fn draw_inventory(frame: &mut Frame, world: &World) {
     let popup = centered_rect(70, 70, frame.area());
     let title = format!("Inventory ({} items) - Esc to close", world.player.inventory.len());
-    let mut list_items = body_status_lines(world);
-    list_items.push(ListItem::new(match &world.player.wielded {
+    let mut list_items = vec![ListItem::new(match &world.player.wielded {
         Some(item) => format!("Wielding: {}", item.name),
         None => "Wielding: nothing".to_string(),
-    }));
+    })];
     list_items.extend(inventory_letters(&world.player.inventory));
     let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(Clear, popup);
@@ -540,6 +562,38 @@ fn draw_awaiting_key(frame: &mut Frame, direction: Direction) {
         Paragraph::new(text).block(Block::default().title("Rebind").borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(paragraph, popup);
+}
+
+/// '?': looks up each action's *actual* key in the current preset rather
+/// than hardcoding text, so it stays correct if presets change.
+fn draw_help(frame: &mut Frame, binds: &KeyBindings) {
+    fn entry(binds: &KeyBindings, label: &str, action: Action) -> String {
+        let key = binds.key_for_action(action).map(describe_key).unwrap_or_else(|| "unbound".to_string());
+        format!("{label}: {key}")
+    }
+
+    let lines = vec![
+        "Arrows always move; letter keys depend on your preset (see Settings)".to_string(),
+        String::new(),
+        entry(binds, "Open", Action::Open),
+        entry(binds, "Close", Action::Close),
+        entry(binds, "Pick up", Action::PickUp),
+        entry(binds, "Wield/hold", Action::OpenWieldMenu),
+        entry(binds, "Drop", Action::OpenDropMenu),
+        entry(binds, "Examine", Action::OpenExamine),
+        entry(binds, "Eat", Action::OpenEatMenu),
+        entry(binds, "Wait", Action::Wait),
+        String::new(),
+        "i: Inventory    m: Map    x: Look around    ?: This help".to_string(),
+        "Esc: Pause menu (Settings, Quit)".to_string(),
+        String::new(),
+        "(press any key to close)".to_string(),
+    ];
+    let popup = centered_rect(70, 70, frame.area());
+    let list = List::new(lines.into_iter().map(ListItem::new).collect::<Vec<_>>())
+        .block(Block::default().title("Help").borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

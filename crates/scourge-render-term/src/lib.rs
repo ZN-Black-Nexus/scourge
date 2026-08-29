@@ -156,6 +156,8 @@ fn handle_key(
                 };
             } else if code == KeyCode::Char('i') {
                 *screen = Screen::Inventory;
+            } else if code == KeyCode::Char('?') {
+                *screen = Screen::Help;
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 match action {
                     // UI-only - never reach world.step, just switch screens.
@@ -176,7 +178,7 @@ fn handle_key(
                 *screen = Screen::Game;
             }
         }
-        Screen::Examine => {
+        Screen::Examine | Screen::Help => {
             // Dismissed by any key, matching DDA's message-prompt feel.
             *screen = Screen::Game;
         }
