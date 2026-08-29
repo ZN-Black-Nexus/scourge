@@ -4,5 +4,6 @@ fn main() -> std::io::Result<()> {
     for (pos, item) in generated.items {
         world.place_item(pos.x, pos.y, item);
     }
+    world.npcs = generated.npcs;
     scourge_render_term::run(world)
 }

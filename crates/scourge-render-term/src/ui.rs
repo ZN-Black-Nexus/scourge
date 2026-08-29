@@ -151,6 +151,7 @@ fn ratatui_color(c: TileColor) -> Color {
         (ColorSupport::TrueColor, TileColor::DarkGreen) => Color::Rgb(25, 90, 35),
         (ColorSupport::TrueColor, TileColor::Blue) => Color::Rgb(70, 110, 220),
         (ColorSupport::TrueColor, TileColor::Magenta) => Color::Rgb(220, 90, 200),
+        (ColorSupport::TrueColor, TileColor::Yellow) => Color::Rgb(230, 200, 60),
         (ColorSupport::Ansi256, TileColor::White) => Color::Indexed(15),
         (ColorSupport::Ansi256, TileColor::Gray) => Color::Indexed(248),
         (ColorSupport::Ansi256, TileColor::Brown) => Color::Indexed(94),
@@ -159,6 +160,7 @@ fn ratatui_color(c: TileColor) -> Color {
         (ColorSupport::Ansi256, TileColor::DarkGreen) => Color::Indexed(22),
         (ColorSupport::Ansi256, TileColor::Blue) => Color::Indexed(69),
         (ColorSupport::Ansi256, TileColor::Magenta) => Color::Indexed(170),
+        (ColorSupport::Ansi256, TileColor::Yellow) => Color::Indexed(220),
         (ColorSupport::Basic, TileColor::White) => Color::White,
         (ColorSupport::Basic, TileColor::Gray) => Color::Gray,
         (ColorSupport::Basic, TileColor::Brown) => Color::Yellow,
@@ -167,6 +169,10 @@ fn ratatui_color(c: TileColor) -> Color {
         (ColorSupport::Basic, TileColor::DarkGreen) => Color::Green,
         (ColorSupport::Basic, TileColor::Blue) => Color::Blue,
         (ColorSupport::Basic, TileColor::Magenta) => Color::Magenta,
+        // Distinct from Brown's plain Yellow, even though real DDA doesn't
+        // have to make this trade-off - basic 16-color mode is already a
+        // lossy fallback tier.
+        (ColorSupport::Basic, TileColor::Yellow) => Color::LightYellow,
     }
 }
 
@@ -181,6 +187,13 @@ fn player_color() -> Color {
     ratatui_color(TileColor::White)
 }
 
+/// An NPC renders as the same `@` glyph as the player - it's another
+/// survivor, not a monster - distinguished purely by color, matching how
+/// DDA tells actors apart on an ASCII display.
+fn npc_color() -> Color {
+    ratatui_color(TileColor::Yellow)
+}
+
 /// One visible cell: its glyph and style. Three tiers, from a single scan of
 /// line-of-sight and memory: bright (near, currently visible), dimmed (far
 /// but still visible - an approximation of graduated light falloff), and
@@ -189,6 +202,12 @@ fn player_color() -> Color {
 fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> (char, Style) {
     if x == world.player.pos.x && y == world.player.pos.y {
         return ('@', Style::default().fg(player_color()));
+    }
+    // NPCs only ever render while actually in sight, never from fog-of-war
+    // memory like terrain/items do - they move, so a remembered position
+    // would just as often be a lie as the truth.
+    if visible.is_visible(x, y) && world.npc_at(x, y).is_some() {
+        return ('@', Style::default().fg(npc_color()));
     }
     // A ground item sitting on a tile needs its own marker - otherwise it's
     // invisible on the map, since the cell would just show plain terrain and
@@ -399,6 +418,13 @@ fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i3
     let is_player = x == world.player.pos.x && y == world.player.pos.y;
     if !is_player && !visible.is_visible(x, y) && !explored.is_seen(x, y) {
         return "unknown".to_string();
+    }
+    // NPCs are only ever described while actually visible, matching how
+    // they're rendered - no fog-of-war memory of where one used to be.
+    if !is_player && visible.is_visible(x, y) {
+        if let Some(npc) = world.npc_at(x, y) {
+            return npc.name.clone();
+        }
     }
     let terrain = if is_player {
         "yourself"

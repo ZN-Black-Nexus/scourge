@@ -99,6 +99,7 @@ pub enum TileColor {
     DarkGreen,
     Blue,
     Magenta,
+    Yellow,
 }
 
 /// A single terrain type. More kinds (rubble, water...) land here as they're needed.
@@ -711,9 +712,49 @@ pub struct Player {
     pub self_aware: bool,
 }
 
+/// Deliberately just two states, not DDA/BN's full faction-reputation
+/// system - `Friendly` is the only one anything acts on so far. `Hostile`
+/// exists now because enemy AI is the very next thing being built on top of
+/// this same `Npc` type, not because of any other planned use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attitude {
+    Friendly,
+    Hostile,
+}
+
+/// A non-player character. Reuses `Health`/`Item` rather than inventing
+/// NPC-specific versions, since an NPC is mechanically just another
+/// creature on the map - the only new thing it needs is `attitude` to
+/// decide what its AI does each turn.
+pub struct Npc {
+    pub name: String,
+    pub pos: Pos,
+    pub health: Health,
+    pub inventory: Vec<Item>,
+    pub attitude: Attitude,
+}
+
+impl Npc {
+    pub fn new(name: impl Into<String>, pos: Pos, attitude: Attitude) -> Self {
+        Npc {
+            name: name.into(),
+            pos,
+            health: Health::from_strength(8),
+            inventory: Vec::new(),
+            attitude,
+        }
+    }
+}
+
+/// A friendly NPC keeps this close to the player before it stops closing
+/// the distance, so it reads as "following alongside" rather than either
+/// crowding onto the player's own tile or trailing far behind out of sight.
+const FOLLOW_DISTANCE: i32 = 3;
+
 pub struct World {
     pub map: Map,
     pub player: Player,
+    pub npcs: Vec<Npc>,
     pub turn: u64,
     ground_items: std::collections::HashMap<(i32, i32), Vec<Item>>,
     /// What the last action actually did, in plain words - e.g. "Picked up
@@ -739,6 +780,7 @@ impl World {
                 hunger: 0,
                 self_aware: false,
             },
+            npcs: Vec::new(),
             turn: 0,
             ground_items: std::collections::HashMap::new(),
             last_message: None,
@@ -753,6 +795,18 @@ impl World {
 
     pub fn items_at(&self, x: i32, y: i32) -> &[Item] {
         self.ground_items.get(&(x, y)).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn npc_at(&self, x: i32, y: i32) -> Option<&Npc> {
+        self.npcs.iter().find(|n| n.pos.x == x && n.pos.y == y)
+    }
+
+    /// True if the player or any NPC already occupies this tile - checked
+    /// before letting an NPC step onto it, so followers don't pile onto the
+    /// player or onto each other.
+    fn actor_at(&self, x: i32, y: i32, exclude_npc: usize) -> bool {
+        (self.player.pos.x == x && self.player.pos.y == y)
+            || self.npcs.iter().enumerate().any(|(i, n)| i != exclude_npc && n.pos.x == x && n.pos.y == y)
     }
 
     /// Swaps in a freshly generated map (e.g. on terminal resize) and repositions the player.
@@ -798,6 +852,10 @@ impl World {
             Action::Move(dir) => {
                 let (dx, dy) = direction_delta(dir);
                 let (nx, ny) = (self.player.pos.x + dx, self.player.pos.y + dy);
+                if let Some(npc) = self.npc_at(nx, ny) {
+                    self.last_message = Some(format!("{} is in the way.", npc.name));
+                    return true;
+                }
                 match self.map.tile(nx, ny) {
                     Some(Tile::DoorClosed) => {
                         self.map.set(nx, ny, Tile::DoorOpen);
@@ -939,6 +997,32 @@ impl World {
         self.turn += 1;
         if self.turn % 100 == 0 {
             self.player.hunger = (self.player.hunger + 1).min(100);
+        }
+        self.update_npcs();
+    }
+
+    /// Every NPC gets one simple action per turn, run right alongside the
+    /// player's own turn-costing actions - this is deliberately far simpler
+    /// than DDA/BN's real NPC AI: a friendly NPC just closes the distance
+    /// to the player when it's wandered off past `FOLLOW_DISTANCE`, one
+    /// tile at a time, and does nothing else (no pathfinding around
+    /// obstacles - it can get stuck behind them, which is an accepted
+    /// limitation of this first pass). Hostile NPCs don't act yet; that's
+    /// the enemy-AI phase this is groundwork for.
+    fn update_npcs(&mut self) {
+        for i in 0..self.npcs.len() {
+            if self.npcs[i].attitude != Attitude::Friendly {
+                continue;
+            }
+            let pos = self.npcs[i].pos;
+            let (dx, dy) = (self.player.pos.x - pos.x, self.player.pos.y - pos.y);
+            if dx * dx + dy * dy <= FOLLOW_DISTANCE * FOLLOW_DISTANCE {
+                continue;
+            }
+            let (nx, ny) = (pos.x + dx.signum(), pos.y + dy.signum());
+            if self.map.tile(nx, ny).is_some_and(Tile::is_walkable) && !self.actor_at(nx, ny, i) {
+                self.npcs[i].pos = Pos { x: nx, y: ny };
+            }
         }
     }
 }
@@ -1240,5 +1324,67 @@ mod tests {
         map.set(2, 0, Tile::Window { open: false, curtain_open: false });
         assert!(!map.transparent(2, 0));
         assert!(!map.tile(2, 0).unwrap().is_walkable(), "closed sash still blocks movement");
+    }
+
+    #[test]
+    fn friendly_npc_closes_the_distance_when_far_from_the_player() {
+        let map = Map::new(30, 30, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 15, y: 15 };
+        world.npcs.push(Npc::new("Ally", Pos { x: 5, y: 15 }, Attitude::Friendly));
+
+        let start_dist = (world.player.pos.x - world.npcs[0].pos.x).abs();
+        world.step(Action::Wait);
+        let after_dist = (world.player.pos.x - world.npcs[0].pos.x).abs();
+        assert!(after_dist < start_dist, "should have stepped one tile closer");
+    }
+
+    #[test]
+    fn friendly_npc_stays_put_once_within_follow_distance() {
+        let map = Map::new(10, 10, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 5, y: 5 };
+        world.npcs.push(Npc::new("Ally", Pos { x: 6, y: 5 }, Attitude::Friendly));
+
+        world.step(Action::Wait);
+        assert_eq!(world.npcs[0].pos, Pos { x: 6, y: 5 }, "already within FOLLOW_DISTANCE, shouldn't move");
+    }
+
+    #[test]
+    fn friendly_npc_never_steps_onto_the_players_tile() {
+        let map = Map::new(6, 3, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 4, y: 1 };
+        world.npcs.push(Npc::new("Ally", Pos { x: 0, y: 1 }, Attitude::Friendly));
+
+        for _ in 0..20 {
+            world.step(Action::Wait);
+            assert_ne!(world.npcs[0].pos, world.player.pos, "NPC must never occupy the player's tile");
+        }
+    }
+
+    #[test]
+    fn bumping_into_a_friendly_npc_blocks_the_move_without_costing_a_turn() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        world.npcs.push(Npc::new("Ally", Pos { x: 3, y: 2 }, Attitude::Friendly));
+
+        let turn_before = world.turn;
+        assert!(world.step(Action::Move(Direction::East)));
+        assert_eq!(world.player.pos, Pos { x: 2, y: 2 }, "blocked, didn't move onto the NPC");
+        assert_eq!(world.turn, turn_before, "a blocked bump costs no turn, same as bumping a wall");
+        assert_eq!(world.last_message.as_deref(), Some("Ally is in the way."));
+    }
+
+    #[test]
+    fn hostile_npcs_do_not_move_yet() {
+        let map = Map::new(30, 30, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 15, y: 15 };
+        world.npcs.push(Npc::new("Raider", Pos { x: 5, y: 15 }, Attitude::Hostile));
+
+        world.step(Action::Wait);
+        assert_eq!(world.npcs[0].pos, Pos { x: 5, y: 15 }, "enemy AI isn't built yet - hostiles are inert");
     }
 }

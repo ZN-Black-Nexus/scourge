@@ -1,7 +1,7 @@
 //! World/map generation and simulation.
 
 use rand::Rng;
-use scourge_core::{Item, Map, Pos, Tile};
+use scourge_core::{Attitude, Item, Map, Npc, Pos, Tile};
 
 /// Fixed placeholder world size - much larger than any terminal, so the
 /// camera actually has room to pan. Chunk-based/effectively-infinite
@@ -14,6 +14,7 @@ pub const MAP_HEIGHT: i32 = 200;
 pub struct Generated {
     pub map: Map,
     pub items: Vec<(Pos, Item)>,
+    pub npcs: Vec<Npc>,
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +46,7 @@ pub fn generate(width: i32, height: i32) -> Generated {
     border_walls(&mut map);
 
     let mut items = Vec::new();
+    let mut npcs = Vec::new();
 
     if width > 12 && height > 12 {
         let mut rng = rand::thread_rng();
@@ -69,9 +71,38 @@ pub fn generate(width: i32, height: i32) -> Generated {
 
         scatter_vegetation(&mut map, &mut rng);
         items = scatter_items(&map, &mut rng);
+
+        // Placed a few tiles off the player's own spawn point (which is the
+        // exact map center - see `World::place_player_at_center`) so the
+        // ally starts out visible nearby rather than exactly underfoot,
+        // without yet knowing where the player actually landed.
+        let ally_pos = find_walkable_near(&map, width / 2 + 3, height / 2);
+        npcs.push(Npc::new("Ally", ally_pos, Attitude::Friendly));
     }
 
-    Generated { map, items }
+    Generated { map, items, npcs }
+}
+
+/// Scans outward in expanding rings from `(x, y)` for the nearest walkable
+/// tile - a small local search, distinct from (but mirroring) `World`'s own
+/// private `nearest_walkable`, since generation happens before there's a
+/// `World` to ask.
+fn find_walkable_near(map: &Map, x: i32, y: i32) -> Pos {
+    if map.tile(x, y).is_some_and(Tile::is_walkable) {
+        return Pos { x, y };
+    }
+    let max_radius = map.width.max(map.height);
+    for radius in 1..=max_radius {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let (nx, ny) = (x + dx, y + dy);
+                if map.tile(nx, ny).is_some_and(Tile::is_walkable) {
+                    return Pos { x: nx, y: ny };
+                }
+            }
+        }
+    }
+    Pos { x, y }
 }
 
 fn is_open_ground(tile: Option<Tile>) -> bool {
@@ -249,5 +280,12 @@ mod tests {
         );
 
         assert!(!generated.items.is_empty(), "expected some scattered ground items");
+
+        assert_eq!(generated.npcs.len(), 1, "expected the one guaranteed starter ally");
+        let ally = &generated.npcs[0];
+        assert!(
+            world.map.tile(ally.pos.x, ally.pos.y).unwrap().is_walkable(),
+            "the ally must spawn on a walkable tile too"
+        );
     }
 }
