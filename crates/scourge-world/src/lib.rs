@@ -136,8 +136,8 @@ fn scatter_vegetation(map: &mut Map, rng: &mut impl Rng) {
     }
 }
 
-/// A handful of placeholder ground items to make the inventory mechanic
-/// testable. Real loot tables are future work.
+/// A handful of placeholder ground items to make the inventory/eat
+/// mechanics testable. Real loot tables are future work.
 fn scatter_items(map: &Map, rng: &mut impl Rng) -> Vec<(Pos, Item)> {
     let count = (map.width * map.height) / 600;
     let mut items = Vec::new();
@@ -145,7 +145,12 @@ fn scatter_items(map: &Map, rng: &mut impl Rng) -> Vec<(Pos, Item)> {
         let x = rng.gen_range(1..map.width - 1);
         let y = rng.gen_range(1..map.height - 1);
         if is_open_ground(map.tile(x, y)) || map.tile(x, y) == Some(Tile::Floor) {
-            items.push((Pos { x, y }, Item { name: "Rock".to_string() }));
+            let item = if rng.gen_bool(0.4) {
+                Item::food("Blueberries", 20)
+            } else {
+                Item::new("Rock")
+            };
+            items.push((Pos { x, y }, item));
         }
     }
     items

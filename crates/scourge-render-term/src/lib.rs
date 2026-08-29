@@ -162,6 +162,7 @@ fn handle_key(
                     Action::OpenWieldMenu => *screen = Screen::WieldSelect,
                     Action::OpenDropMenu => *screen = Screen::DropSelect,
                     Action::OpenExamine => *screen = Screen::Examine,
+                    Action::OpenEatMenu => *screen = Screen::EatSelect,
                     _ => {
                         if !world.step(action) {
                             return false;
@@ -203,6 +204,19 @@ fn handle_key(
                     let index = (c as u8 - b'a') as usize;
                     if index < world.player.inventory.len() {
                         world.step(Action::Drop(index));
+                        *screen = Screen::Game;
+                    }
+                }
+            }
+        }
+        Screen::EatSelect => {
+            if code == KeyCode::Esc {
+                *screen = Screen::Game;
+            } else if let KeyCode::Char(c) = code {
+                if c.is_ascii_lowercase() {
+                    let index = (c as u8 - b'a') as usize;
+                    if index < world.player.inventory.len() {
+                        world.step(Action::Eat(index));
                         *screen = Screen::Game;
                     }
                 }

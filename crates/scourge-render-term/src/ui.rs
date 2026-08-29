@@ -42,6 +42,8 @@ pub enum Screen {
     WieldSelect,
     /// 'd'/'p': pick an inventory letter to drop onto the player's tile.
     DropSelect,
+    /// Shift+E: pick a letter to eat - list only shows food.
+    EatSelect,
     /// 'e'/'l': a quick, cursor-free description of the player's own tile -
     /// dismissed by any key.
     Examine,
@@ -79,6 +81,7 @@ pub fn draw(
         Screen::Inventory => draw_inventory(frame, world),
         Screen::WieldSelect => draw_wield_select(frame, world),
         Screen::DropSelect => draw_drop_select(frame, world),
+        Screen::EatSelect => draw_eat_select(frame, world),
         Screen::Examine => draw_examine(frame, world, explored, visible),
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
@@ -251,7 +254,10 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &m
         Rect::new(0, 0, area.width, map_height),
     );
 
-    let status = format!("turn {} - Esc:menu m:map x:look i:inv g:get o/c:open/close", world.turn);
+    let status = format!(
+        "turn {} HP:{}/{} hunger:{} - Esc:menu m:map x:look i:inv g:get o/c:open/close",
+        world.turn, world.player.health.current, world.player.health.max, world.player.hunger
+    );
     frame.render_widget(
         Paragraph::new(status),
         Rect::new(0, map_height, area.width, 1),
@@ -424,6 +430,30 @@ fn draw_drop_select(frame: &mut Frame, world: &World) {
     let title = "Drop what? (letter to pick, Esc to cancel)";
     let list = List::new(inventory_letters(&world.player.inventory))
         .block(Block::default().title(title).borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
+/// Only lists food - letters still correspond to the item's real inventory
+/// index (not renumbered), so pressing one maps back to the right slot.
+fn eat_letters(inventory: &[scourge_core::Item]) -> Vec<ListItem<'static>> {
+    let food: Vec<_> = inventory.iter().enumerate().filter(|(_, item)| item.is_food()).collect();
+    if food.is_empty() {
+        return vec![ListItem::new("(nothing edible carried)")];
+    }
+    food.into_iter()
+        .map(|(i, item)| {
+            let letter = (b'a' + (i as u8 % 26)) as char;
+            ListItem::new(format!("{letter} - {}", item.name))
+        })
+        .collect()
+}
+
+fn draw_eat_select(frame: &mut Frame, world: &World) {
+    let popup = centered_rect(70, 70, frame.area());
+    let title = format!("Eat what? (hunger: {}/100, letter to pick, Esc to cancel)", world.player.hunger);
+    let list =
+        List::new(eat_letters(&world.player.inventory)).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
 }

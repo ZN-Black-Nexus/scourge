@@ -15,9 +15,15 @@ Movement: cardinals `hjkl`/numpad/arrows, diagonals `yubn`. Core actions:
 | Open door/window | `o` | Close door/window | `c` |
 | Examine | `e` | Pick up | `,` or `g` |
 | Look around (free cursor) | `x` or `;` | Sleep | `$` |
-| Wait | `\|` | Running/crouch toggle | `"` |
+| Wait | `.` | Running/crouch toggle | `"` |
 
 Sources: [CDDA wiki mirror - Controls](https://srgnis.github.io/cdda-wiki/cdda_wiki/Controls), [DefKey CDDA shortcuts](https://defkey.com/cdda-cataclysm-dark-days-ahead-shortcuts)
+
+**Correction (2026-08-28):** the wiki-mirror fetch above originally said
+`|` for wait. The user corrected this from direct DDA experience - it's
+`.`, a very standard "wait a turn" key across roguelikes generally. Fixed
+in code and in the table above; trust direct player experience over a
+secondhand source summary when they conflict.
 
 Note several are same-letter shift pairs for related actions: wield/wear
 (`w`/`W`), drop/drop-to-tile (`d`/`D`), apply/apply-wielded (`a`/`A`).
@@ -54,8 +60,11 @@ its most-used action keys.
   - **examine -> "look": `l`** — implemented. Vi preset keeps DDA's real `e`.
     A quick cursor-free "what's on my own tile" query, distinct from the
     free-roam `x` look-around.
-- **`|` (wait)** is shared by both presets too, like `o`/`g` - real DDA key,
+- **`.` (wait)** is shared by both presets too, like `o`/`g` - real DDA key,
   not used by either movement scheme. Just passes the turn.
+- **Shift+`E` (eat)** is also shared - movement only binds lowercase `e` in
+  wasd, so uppercase `E` is free on both presets without needing a synonym.
+  Implemented; only lists food items to eat.
 - This is a *default*, not a constraint - full custom rebinding already
   exists (`scourge-render-term`'s Settings screen), so a player can always
   override any of this.

@@ -66,6 +66,14 @@ pub enum Action {
     /// quick, cursor-free version of the free-roam 'x' look. 'e' on vi
     /// (real DDA), 'l' ("look") on wasd since 'e' is movement there.
     OpenExamine,
+    /// UI-only, same pattern as `OpenWieldMenu`/`OpenDropMenu`: opens the
+    /// eat-selection screen. Shift+E, real DDA - free on both presets since
+    /// neither movement scheme uses the shifted letter, only lowercase.
+    OpenEatMenu,
+    /// Eats inventory item at this index if it's food; no-ops otherwise
+    /// (the eat-select screen only lists food, so this shouldn't normally
+    /// be reachable with a non-food index, but step() stays defensive).
+    Eat(usize),
 }
 
 /// Backend-agnostic terrain color name. `scourge-core` has no rendering
@@ -343,12 +351,74 @@ fn bresenham_line(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
     points
 }
 
-/// A minimal carryable/ground item - just a name for now. Real items (with
-/// weight/volume/containers, matching DDA's actual inventory model) are
-/// future work once there's a mod-data pipeline to define them.
+/// What an item actually does, if anything. Deliberately minimal - real
+/// items (weight/volume/containers/weapons, matching DDA's actual model)
+/// are future work once there's a mod-data pipeline to define them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemKind {
+    Generic,
+    Food { hunger_restored: i32 },
+}
+
+/// A minimal carryable/ground item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     pub name: String,
+    pub kind: ItemKind,
+}
+
+impl Item {
+    pub fn new(name: impl Into<String>) -> Self {
+        Item { name: name.into(), kind: ItemKind::Generic }
+    }
+
+    pub fn food(name: impl Into<String>, hunger_restored: i32) -> Self {
+        Item { name: name.into(), kind: ItemKind::Food { hunger_restored } }
+    }
+
+    pub fn is_food(&self) -> bool {
+        matches!(self.kind, ItemKind::Food { .. })
+    }
+}
+
+/// The four primary attributes, DDA-style. Deliberately just flat numbers
+/// with no derived skills/combat math yet - only `strength` currently does
+/// anything (feeds `Health::from_strength`). The others are groundwork for
+/// when carry capacity, hit chance, etc. get built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stats {
+    pub strength: i32,
+    pub dexterity: i32,
+    pub intelligence: i32,
+    pub perception: i32,
+}
+
+impl Default for Stats {
+    /// 8 in each stat - an unremarkable, average starting character, same
+    /// baseline DDA uses before any traits/points are spent.
+    fn default() -> Self {
+        Stats { strength: 8, dexterity: 8, intelligence: 8, perception: 8 }
+    }
+}
+
+/// A single HP pool - deliberately simpler than DDA/BN's per-body-part
+/// health, matching the project's own "much simpler than BN" design goal.
+/// No damage sources or regeneration exist yet, so this just sits at max
+/// until combat (or anything else) is built to change it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Health {
+    pub current: i32,
+    pub max: i32,
+}
+
+impl Health {
+    /// A simple linear scale-up from strength, echoing (without copying)
+    /// DDA's own HP-from-strength relationship. Placeholder formula - easy
+    /// to retune once there's actual damage to balance against.
+    pub fn from_strength(strength: i32) -> Self {
+        let max = 60 + strength * 5;
+        Health { current: max, max }
+    }
 }
 
 pub struct Player {
@@ -357,6 +427,12 @@ pub struct Player {
     /// The one item currently held in hand, distinct from carried inventory
     /// - matches DDA's model of wielding being separate from just carrying.
     pub wielded: Option<Item>,
+    pub stats: Stats,
+    pub health: Health,
+    /// 0 (fully fed) to 100 (starving). Ticks up slowly over time (see
+    /// `World::tick`); nothing happens yet at 100 - that's a balance
+    /// decision for later, once there's a reason to tune it carefully.
+    pub hunger: i32,
 }
 
 pub struct World {
@@ -368,12 +444,16 @@ pub struct World {
 
 impl World {
     pub fn new(map: Map) -> Self {
+        let stats = Stats::default();
         let mut world = World {
             map,
             player: Player {
                 pos: Pos { x: 0, y: 0 },
                 inventory: Vec::new(),
                 wielded: None,
+                health: Health::from_strength(stats.strength),
+                stats,
+                hunger: 0,
             },
             turn: 0,
             ground_items: std::collections::HashMap::new(),
@@ -433,15 +513,15 @@ impl World {
                 match self.map.tile(nx, ny) {
                     Some(Tile::DoorClosed) => {
                         self.map.set(nx, ny, Tile::DoorOpen);
-                        self.turn += 1;
+                        self.tick();
                     }
                     Some(Tile::Window { open: false, curtain_open }) => {
                         self.map.set(nx, ny, Tile::Window { open: true, curtain_open });
-                        self.turn += 1;
+                        self.tick();
                     }
                     Some(t) if t.is_walkable() => {
                         self.player.pos = Pos { x: nx, y: ny };
-                        self.turn += 1;
+                        self.tick();
                     }
                     _ => {}
                 }
@@ -468,14 +548,13 @@ impl World {
             }),
             Action::PickUp => {
                 let key = (self.player.pos.x, self.player.pos.y);
-                if let Some(items) = self.ground_items.get_mut(&key) {
-                    if let Some(item) = items.pop() {
-                        self.player.inventory.push(item);
-                        self.turn += 1;
-                    }
-                    if items.is_empty() {
-                        self.ground_items.remove(&key);
-                    }
+                let popped = self.ground_items.get_mut(&key).and_then(Vec::pop);
+                if let Some(item) = popped {
+                    self.player.inventory.push(item);
+                    self.tick();
+                }
+                if self.ground_items.get(&key).is_some_and(Vec::is_empty) {
+                    self.ground_items.remove(&key);
                 }
             }
             // Never actually reaches here in normal play - the render layer
@@ -488,16 +567,16 @@ impl World {
                     if let Some(old) = self.player.wielded.replace(new_wielded) {
                         self.player.inventory.push(old);
                     }
-                    self.turn += 1;
+                    self.tick();
                 }
             }
             Action::Unwield => {
                 if let Some(old) = self.player.wielded.take() {
                     self.player.inventory.push(old);
-                    self.turn += 1;
+                    self.tick();
                 }
             }
-            Action::Wait => self.turn += 1,
+            Action::Wait => self.tick(),
             // Never actually reaches here in normal play - the render layer
             // intercepts these to open UI screens instead.
             Action::OpenDropMenu | Action::OpenExamine => {}
@@ -505,7 +584,17 @@ impl World {
                 if index < self.player.inventory.len() {
                     let item = self.player.inventory.remove(index);
                     self.place_item(self.player.pos.x, self.player.pos.y, item);
-                    self.turn += 1;
+                    self.tick();
+                }
+            }
+            Action::OpenEatMenu => {}
+            Action::Eat(index) => {
+                if let Some(item) = self.player.inventory.get(index) {
+                    if let ItemKind::Food { hunger_restored } = item.kind {
+                        self.player.hunger = (self.player.hunger - hunger_restored).max(0);
+                        self.player.inventory.remove(index);
+                        self.tick();
+                    }
                 }
             }
         }
@@ -523,9 +612,20 @@ impl World {
             let (x, y) = (self.player.pos.x + dx, self.player.pos.y + dy);
             if let Some(tile) = self.map.tile(x, y).and_then(&transition) {
                 self.map.set(x, y, tile);
-                self.turn += 1;
+                self.tick();
                 return;
             }
+        }
+    }
+
+    /// Advances the turn counter and anything that passively changes over
+    /// time - currently just hunger, ticking up very slowly. Every
+    /// turn-costing action should go through this rather than touching
+    /// `self.turn` directly, so time-based effects stay centralized.
+    fn tick(&mut self) {
+        self.turn += 1;
+        if self.turn % 100 == 0 {
+            self.player.hunger = (self.player.hunger + 1).min(100);
         }
     }
 }
@@ -535,7 +635,7 @@ mod tests {
     use super::*;
 
     fn item(name: &str) -> Item {
-        Item { name: name.to_string() }
+        Item::new(name)
     }
 
     #[test]
@@ -573,6 +673,37 @@ mod tests {
     }
 
     #[test]
+    fn hunger_ticks_up_slowly_and_eating_reduces_it() {
+        let map = Map::new(3, 3, Tile::Floor);
+        let mut world = World::new(map);
+        assert_eq!(world.player.hunger, 0);
+
+        for _ in 0..99 {
+            world.step(Action::Wait);
+        }
+        assert_eq!(world.player.hunger, 0, "not yet at the 100-turn tick");
+        world.step(Action::Wait);
+        assert_eq!(world.turn, 100);
+        assert_eq!(world.player.hunger, 1, "one tick every 100 turns");
+
+        world.player.inventory = vec![Item::food("Blueberries", 20)];
+        world.step(Action::Eat(0));
+        assert_eq!(world.player.hunger, 0, "clamped at 0, not negative");
+        assert!(world.player.inventory.is_empty());
+    }
+
+    #[test]
+    fn cannot_eat_a_non_food_item() {
+        let map = Map::new(3, 3, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.inventory = vec![item("Rock")];
+
+        world.step(Action::Eat(0));
+        assert_eq!(world.player.inventory, vec![item("Rock")], "rock is not food, nothing happens");
+        assert_eq!(world.turn, 0, "no turn cost for a no-op");
+    }
+
+    #[test]
     fn dropping_places_the_item_on_the_players_own_tile() {
         let map = Map::new(3, 3, Tile::Floor);
         let mut world = World::new(map);
@@ -607,11 +738,11 @@ mod tests {
         let map = Map::new(3, 3, Tile::Floor);
         let mut world = World::new(map);
         world.player.pos = Pos { x: 1, y: 1 };
-        world.place_item(1, 1, Item { name: "Rock".to_string() });
+        world.place_item(1, 1, Item::new("Rock"));
 
         assert_eq!(world.items_at(1, 1).len(), 1);
         world.step(Action::PickUp);
-        assert_eq!(world.player.inventory, vec![Item { name: "Rock".to_string() }]);
+        assert_eq!(world.player.inventory, vec![Item::new("Rock")]);
         assert!(world.items_at(1, 1).is_empty());
         assert_eq!(world.turn, 1);
 

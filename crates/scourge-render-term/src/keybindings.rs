@@ -83,12 +83,16 @@ impl KeyBindings {
     fn from_pairs(pairs: &[(KeyCode, Direction)]) -> Self {
         let mut bindings: HashMap<KeyCode, Action> =
             pairs.iter().map(|(k, d)| (*k, Action::Move(*d))).collect();
-        // 'o' (open), 'g' (get/pick up), and '|' (wait) are shared by both
-        // presets - none are letters either movement scheme uses, and all
-        // three match real DDA's own bindings.
+        // 'o' (open), 'g' (get/pick up), '.' (wait - corrected from an
+        // earlier, apparently wrong '|' based on the user's actual DDA
+        // experience), and Shift+E (eat) are shared by both presets - none
+        // of these are letters either movement scheme uses (movement only
+        // binds lowercase 'e' in wasd, so uppercase 'E' stays free there
+        // too), and all four match real DDA's own bindings.
         bindings.insert(KeyCode::Char('o'), Action::Open);
         bindings.insert(KeyCode::Char('g'), Action::PickUp);
-        bindings.insert(KeyCode::Char('|'), Action::Wait);
+        bindings.insert(KeyCode::Char('.'), Action::Wait);
+        bindings.insert(KeyCode::Char('E'), Action::OpenEatMenu);
         KeyBindings { bindings }
     }
 
