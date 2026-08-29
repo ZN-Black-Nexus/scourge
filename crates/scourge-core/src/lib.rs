@@ -25,6 +25,38 @@ const ADJACENT_OFFSETS: [(i32, i32); 8] = [
     (1, -1), (-1, -1), (1, 1), (-1, 1),
 ];
 
+/// Buckets a displacement into one of the 8 compass directions - used by
+/// the sidebar compass to say which way a visible creature is, not just
+/// that one exists. `dy` follows this codebase's convention of increasing
+/// southward (see `direction_delta`), so it's negated before the angle
+/// calculation to get a normal compass bearing.
+pub fn compass_direction(dx: i32, dy: i32) -> Direction {
+    let angle = (dx as f64).atan2(-dy as f64).to_degrees();
+    let angle = if angle < 0.0 { angle + 360.0 } else { angle };
+    match ((angle + 22.5) / 45.0) as i32 % 8 {
+        0 => Direction::North,
+        1 => Direction::NorthEast,
+        2 => Direction::East,
+        3 => Direction::SouthEast,
+        4 => Direction::South,
+        5 => Direction::SouthWest,
+        6 => Direction::West,
+        _ => Direction::NorthWest,
+    }
+}
+
+/// One turn is one second, matching real BN's clock - a fixed in-game
+/// start of Day 1, 08:00:00 (also BN's default), advanced purely by the
+/// turn counter rather than any separate clock state.
+pub fn format_clock(turn: u64) -> String {
+    const START_OF_DAY_SECONDS: u64 = 8 * 3600;
+    let total = turn + START_OF_DAY_SECONDS;
+    let day = total / 86400 + 1;
+    let seconds_today = total % 86400;
+    let (h, m, s) = (seconds_today / 3600, (seconds_today % 3600) / 60, seconds_today % 60);
+    format!("Day {day}, {h:02}:{m:02}:{s:02}")
+}
+
 pub fn direction_delta(dir: Direction) -> (i32, i32) {
     match dir {
         Direction::North => (0, -1),
@@ -81,6 +113,15 @@ pub enum Action {
     /// (the eat-select screen only lists food, so this shouldn't normally
     /// be reachable with a non-food index, but step() stays defensive).
     Eat(usize),
+    /// Trades positions with the NPC at this index in `World.npcs` - real
+    /// DDA lets you do this with a friendly ally so it doesn't permanently
+    /// block a doorway or corridor. No-ops (with a message) if the NPC
+    /// isn't actually adjacent by the time this runs.
+    SwapPlaces(usize),
+    /// A single canned greeting from the NPC at this index - a placeholder
+    /// for real dialogue trees, which don't exist yet. No-ops (with a
+    /// message) if the NPC isn't actually adjacent.
+    Talk(usize),
 }
 
 /// Backend-agnostic terrain color name. `scourge-core` has no rendering
@@ -100,6 +141,7 @@ pub enum TileColor {
     Blue,
     Magenta,
     Yellow,
+    Red,
 }
 
 /// A single terrain type. More kinds (rubble, water...) land here as they're needed.
@@ -158,7 +200,10 @@ impl Tile {
             Tile::Wall => '#',
             Tile::DoorClosed => '+',
             Tile::DoorOpen => '\'',
-            Tile::Window { open: true, .. } => '_',
+            // Same glyph as an open door - real BN's convention too - but
+            // never confused for one since doors and windows are different
+            // colors (see `color()`).
+            Tile::Window { open: true, .. } => '\'',
             Tile::Window { open: false, .. } => '"',
             Tile::BlueberryBush => '*',
             Tile::Tree => 't',
@@ -694,6 +739,7 @@ impl Skills {
 }
 
 pub struct Player {
+    pub name: String,
     pub pos: Pos,
     pub inventory: Vec<Item>,
     /// The one item currently held in hand, distinct from carried inventory
@@ -771,6 +817,7 @@ impl World {
         let mut world = World {
             map,
             player: Player {
+                name: "Survivor".to_string(),
                 pos: Pos { x: 0, y: 0 },
                 inventory: Vec::new(),
                 wielded: None,
@@ -799,6 +846,14 @@ impl World {
 
     pub fn npc_at(&self, x: i32, y: i32) -> Option<&Npc> {
         self.npcs.iter().find(|n| n.pos.x == x && n.pos.y == y)
+    }
+
+    /// Same lookup as `npc_at`, but returns the index into `npcs` instead
+    /// of the NPC itself - needed wherever the caller has to name the NPC
+    /// again later (e.g. `Action::Talk`/`SwapPlaces` take an index, not a
+    /// borrow, since they mutate `World`).
+    pub fn npc_index_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.npcs.iter().position(|n| n.pos.x == x && n.pos.y == y)
     }
 
     /// True if the player or any NPC already occupies this tile - checked
@@ -969,6 +1024,30 @@ impl World {
                 }
                 _ => self.last_message = Some("You can't eat that.".to_string()),
             },
+            Action::SwapPlaces(index) => {
+                let adjacent = self.npcs.get(index).is_some_and(|n| {
+                    (n.pos.x - self.player.pos.x).abs() <= 1 && (n.pos.y - self.player.pos.y).abs() <= 1
+                });
+                if adjacent {
+                    let npc_pos = self.npcs[index].pos;
+                    self.npcs[index].pos = self.player.pos;
+                    self.last_message = Some(format!("Swapped places with {}.", self.npcs[index].name));
+                    self.player.pos = npc_pos;
+                    self.tick();
+                } else {
+                    self.last_message = Some("They're not close enough for that.".to_string());
+                }
+            }
+            Action::Talk(index) => {
+                let adjacent = self.npcs.get(index).is_some_and(|n| {
+                    (n.pos.x - self.player.pos.x).abs() <= 1 && (n.pos.y - self.player.pos.y).abs() <= 1
+                });
+                self.last_message = if adjacent {
+                    Some(format!("\"Hey there.\" - {}", self.npcs[index].name))
+                } else {
+                    Some("They're not close enough for that.".to_string())
+                };
+            }
         }
         true
     }
@@ -1375,6 +1454,74 @@ mod tests {
         assert_eq!(world.player.pos, Pos { x: 2, y: 2 }, "blocked, didn't move onto the NPC");
         assert_eq!(world.turn, turn_before, "a blocked bump costs no turn, same as bumping a wall");
         assert_eq!(world.last_message.as_deref(), Some("Ally is in the way."));
+    }
+
+    #[test]
+    fn compass_direction_buckets_all_eight_ways_correctly() {
+        assert_eq!(compass_direction(0, -5), Direction::North);
+        assert_eq!(compass_direction(5, -5), Direction::NorthEast);
+        assert_eq!(compass_direction(5, 0), Direction::East);
+        assert_eq!(compass_direction(5, 5), Direction::SouthEast);
+        assert_eq!(compass_direction(0, 5), Direction::South);
+        assert_eq!(compass_direction(-5, 5), Direction::SouthWest);
+        assert_eq!(compass_direction(-5, 0), Direction::West);
+        assert_eq!(compass_direction(-5, -5), Direction::NorthWest);
+    }
+
+    #[test]
+    fn clock_starts_at_day_one_eight_am_and_advances_one_second_per_turn() {
+        assert_eq!(format_clock(0), "Day 1, 08:00:00");
+        assert_eq!(format_clock(3600), "Day 1, 09:00:00");
+        // 16 hours after 08:00 rolls into day 2 at midnight.
+        assert_eq!(format_clock(16 * 3600), "Day 2, 00:00:00");
+    }
+
+    #[test]
+    fn swapping_places_trades_positions_with_an_adjacent_npc() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        world.npcs.push(Npc::new("Ally", Pos { x: 3, y: 2 }, Attitude::Friendly));
+
+        assert!(world.step(Action::SwapPlaces(0)));
+        assert_eq!(world.player.pos, Pos { x: 3, y: 2 });
+        assert_eq!(world.npcs[0].pos, Pos { x: 2, y: 2 });
+        assert_eq!(world.last_message.as_deref(), Some("Swapped places with Ally."));
+    }
+
+    #[test]
+    fn swapping_places_fails_gracefully_when_the_npc_is_not_adjacent() {
+        let map = Map::new(10, 10, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        world.npcs.push(Npc::new("Ally", Pos { x: 8, y: 8 }, Attitude::Friendly));
+
+        let turn_before = world.turn;
+        world.step(Action::SwapPlaces(0));
+        assert_eq!(world.player.pos, Pos { x: 2, y: 2 });
+        assert_eq!(world.turn, turn_before);
+        assert_eq!(world.last_message.as_deref(), Some("They're not close enough for that."));
+    }
+
+    #[test]
+    fn talking_to_an_adjacent_npc_gives_a_canned_greeting() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        world.npcs.push(Npc::new("Ally", Pos { x: 3, y: 2 }, Attitude::Friendly));
+
+        world.step(Action::Talk(0));
+        assert_eq!(world.last_message.as_deref(), Some("\"Hey there.\" - Ally"));
+    }
+
+    #[test]
+    fn npc_index_at_finds_the_right_npc() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.npcs.push(Npc::new("Ally", Pos { x: 3, y: 2 }, Attitude::Friendly));
+
+        assert_eq!(world.npc_index_at(3, 2), Some(0));
+        assert_eq!(world.npc_index_at(0, 0), None);
     }
 
     #[test]

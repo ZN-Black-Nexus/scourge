@@ -7,14 +7,51 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+/// One reorderable block of the sidebar - real BN's '}' sidebar-layout
+/// screen lets you rearrange these (e.g. limbs below stats); the header
+/// (clock + last message) stays pinned above them all, unreorderable, same
+/// as BN's own fixed top area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SidebarSection {
+    Health,
+    Hunger,
+    Stats,
+    Wielded,
+    Compass,
+}
+
+impl SidebarSection {
+    pub const ALL: [SidebarSection; 5] = [
+        SidebarSection::Health,
+        SidebarSection::Hunger,
+        SidebarSection::Stats,
+        SidebarSection::Wielded,
+        SidebarSection::Compass,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SidebarSection::Health => "Health",
+            SidebarSection::Hunger => "Hunger",
+            SidebarSection::Stats => "Stats",
+            SidebarSection::Wielded => "Wielded item",
+            SidebarSection::Compass => "Compass",
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DisplaySettings {
     pub sidebar_on_left: bool,
+    pub sidebar_order: Vec<SidebarSection>,
 }
 
 impl Default for DisplaySettings {
     fn default() -> Self {
-        DisplaySettings { sidebar_on_left: false }
+        DisplaySettings {
+            sidebar_on_left: false,
+            sidebar_order: SidebarSection::ALL.to_vec(),
+        }
     }
 }
 

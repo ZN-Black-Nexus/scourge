@@ -8,11 +8,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use scourge_core::{hp_bar, Action, Direction, Skill, Tile, TileColor, VisibleSet, World};
+use scourge_core::{
+    compass_direction, format_clock, hp_bar, Action, Attitude, Direction, Skill, Stats, Tile, TileColor, VisibleSet,
+    World,
+};
 use scourge_render::{Camera, Explored};
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
-use crate::settings::DisplaySettings;
+use crate::settings::{DisplaySettings, SidebarSection};
 
 /// Right-side status panel width, DDA/BN's classic default sidebar
 /// arrangement instead of a single line of jammed-together info at the
@@ -51,9 +54,17 @@ pub enum Screen {
     DropSelect,
     /// Shift+E: pick a letter to eat - list only shows food.
     EatSelect,
-    /// 'e'/'l': a quick, cursor-free description of the player's own tile -
-    /// dismissed by any key.
-    Examine,
+    /// 'e'/'l': prompts for a direction (or Wait's key for "myself"), then
+    /// examines whatever's actually there - real DDA lets you examine any
+    /// adjacent tile, not just the one you're standing on.
+    ExamineDirection,
+    /// A plain tile's description at these world coordinates - dismissed
+    /// by any key.
+    Examine { x: i32, y: i32 },
+    /// The NPC found by `ExamineDirection` - "many more options" is
+    /// deliberately just these two for now, since nothing else (combat,
+    /// trading, real dialogue) exists yet to hang further options off of.
+    ExamineNpc { npc_index: usize, selected: usize },
     /// Free-look cursor: uses your character's real current sight (not
     /// memory-only like the map screen), lets you inspect anything within
     /// it even off the normal viewport, without moving or costing a turn.
@@ -68,6 +79,16 @@ pub enum Screen {
     /// '?': a keybind reference, dismissed by any key - built from the
     /// current preset's actual bindings rather than a hardcoded guess.
     Help,
+    /// '}': reorders the sidebar's reorderable sections (health/hunger/
+    /// stats/wielded/compass) - real BN's own sidebar-layout screen.
+    SidebarOrder { selected: usize },
+    /// Character creation, step 1: pick a name. The very first screen shown
+    /// on a new game.
+    NameEntry { name: String },
+    /// Character creation, step 2: a small point-buy over the 4 stats -
+    /// intentionally just this much, not real DDA's full traits/
+    /// professions/scenarios character creator.
+    StatAllocation { stats: Stats, pool: i32, selected: usize },
 }
 
 pub fn draw(
@@ -85,21 +106,26 @@ pub fn draw(
             draw_look(frame, world, explored, visible, *cursor_x, *cursor_y)
         }
         Screen::Map { cam_x, cam_y } => draw_map_screen(frame, world, explored, *cam_x, *cam_y),
+        Screen::NameEntry { name } => draw_name_entry(frame, name),
+        Screen::StatAllocation { stats, pool, selected } => draw_stat_allocation(frame, *stats, *pool, *selected),
         _ => draw_game(frame, world, display, camera, explored, visible),
     }
     match screen {
-        Screen::Game | Screen::Look { .. } | Screen::Map { .. } => {}
+        Screen::Game | Screen::Look { .. } | Screen::Map { .. } | Screen::NameEntry { .. } | Screen::StatAllocation { .. } => {}
         Screen::Inventory => draw_inventory(frame, world),
         Screen::Skills => draw_skills(frame, world),
         Screen::WieldSelect => draw_wield_select(frame, world),
         Screen::DropSelect => draw_drop_select(frame, world),
         Screen::EatSelect => draw_eat_select(frame, world),
-        Screen::Examine => draw_examine(frame, world, explored, visible),
+        Screen::ExamineDirection => draw_examine_direction(frame),
+        Screen::Examine { x, y } => draw_examine(frame, world, explored, visible, *x, *y),
+        Screen::ExamineNpc { npc_index, selected } => draw_examine_npc(frame, world, *npc_index, *selected),
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_settings(frame, display, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
         Screen::AwaitingKey { direction } => draw_awaiting_key(frame, *direction),
         Screen::Help => draw_help(frame, binds),
+        Screen::SidebarOrder { selected } => draw_sidebar_order(frame, display, *selected),
     }
 }
 
@@ -152,6 +178,7 @@ fn ratatui_color(c: TileColor) -> Color {
         (ColorSupport::TrueColor, TileColor::Blue) => Color::Rgb(70, 110, 220),
         (ColorSupport::TrueColor, TileColor::Magenta) => Color::Rgb(220, 90, 200),
         (ColorSupport::TrueColor, TileColor::Yellow) => Color::Rgb(230, 200, 60),
+        (ColorSupport::TrueColor, TileColor::Red) => Color::Rgb(220, 50, 50),
         (ColorSupport::Ansi256, TileColor::White) => Color::Indexed(15),
         (ColorSupport::Ansi256, TileColor::Gray) => Color::Indexed(248),
         (ColorSupport::Ansi256, TileColor::Brown) => Color::Indexed(94),
@@ -161,6 +188,7 @@ fn ratatui_color(c: TileColor) -> Color {
         (ColorSupport::Ansi256, TileColor::Blue) => Color::Indexed(69),
         (ColorSupport::Ansi256, TileColor::Magenta) => Color::Indexed(170),
         (ColorSupport::Ansi256, TileColor::Yellow) => Color::Indexed(220),
+        (ColorSupport::Ansi256, TileColor::Red) => Color::Indexed(196),
         (ColorSupport::Basic, TileColor::White) => Color::White,
         (ColorSupport::Basic, TileColor::Gray) => Color::Gray,
         (ColorSupport::Basic, TileColor::Brown) => Color::Yellow,
@@ -173,6 +201,7 @@ fn ratatui_color(c: TileColor) -> Color {
         // have to make this trade-off - basic 16-color mode is already a
         // lossy fallback tier.
         (ColorSupport::Basic, TileColor::Yellow) => Color::LightYellow,
+        (ColorSupport::Basic, TileColor::Red) => Color::Red,
     }
 }
 
@@ -306,7 +335,7 @@ fn draw_game(
         .collect();
     frame.render_widget(Paragraph::new(lines), map_area);
 
-    draw_sidebar(frame, world, display, sidebar_area);
+    draw_sidebar(frame, world, display, visible, sidebar_area);
 }
 
 /// One HP line, e.g. "Head  |||::" by default, or "Head   45/60" with the
@@ -346,28 +375,99 @@ fn hp_color(ratio: f64) -> Color {
     }
 }
 
-fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, area: Rect) {
-    let mut lines = vec![Line::raw(format!("Turn {}", world.turn))];
+/// The compass color for a spotted NPC's name - real BN's own convention:
+/// neutral reads as plain gray, hostile as red. Nothing neutral exists yet
+/// (only `Attitude::Friendly`/`Hostile`), so friendly gets its own color
+/// (green) rather than being lumped in with a "neutral" that doesn't apply.
+fn attitude_color(attitude: Attitude) -> Color {
+    match attitude {
+        Attitude::Friendly => ratatui_color(TileColor::Green),
+        Attitude::Hostile => ratatui_color(TileColor::Red),
+    }
+}
+
+/// BN's sidebar compass: for each of the 8 directions, name the nearest
+/// visible NPC that way, colored by attitude. Directions with nothing
+/// visible are skipped entirely rather than padded out to all 8, since an
+/// empty compass is the common case and 8 mostly-blank lines would just be
+/// wasted sidebar space.
+fn compass_lines(world: &World, visible: &VisibleSet) -> Vec<Line<'static>> {
+    let mut by_direction: Vec<(Direction, &str, Color)> = Vec::new();
+    for npc in &world.npcs {
+        if !visible.is_visible(npc.pos.x, npc.pos.y) {
+            continue;
+        }
+        let (dx, dy) = (npc.pos.x - world.player.pos.x, npc.pos.y - world.player.pos.y);
+        if dx == 0 && dy == 0 {
+            continue;
+        }
+        let dir = compass_direction(dx, dy);
+        by_direction.push((dir, npc.name.as_str(), attitude_color(npc.attitude)));
+    }
+    if by_direction.is_empty() {
+        return vec![Line::raw("(nothing spotted)")];
+    }
+    by_direction
+        .into_iter()
+        .map(|(dir, name, color)| {
+            Line::from(vec![
+                Span::raw(format!("{:<3}", compass_abbrev(dir))),
+                Span::styled(name.to_string(), Style::default().fg(color)),
+            ])
+        })
+        .collect()
+}
+
+fn compass_abbrev(dir: Direction) -> &'static str {
+    match dir {
+        Direction::North => "N",
+        Direction::South => "S",
+        Direction::East => "E",
+        Direction::West => "W",
+        Direction::NorthEast => "NE",
+        Direction::NorthWest => "NW",
+        Direction::SouthEast => "SE",
+        Direction::SouthWest => "SW",
+    }
+}
+
+fn section_lines(section: SidebarSection, world: &World) -> Vec<Line<'static>> {
+    match section {
+        SidebarSection::Health => {
+            world.player.health.parts().into_iter().map(|(bp, part)| hp_line(bp, part, world.player.self_aware)).collect()
+        }
+        SidebarSection::Hunger => vec![Line::raw(format!("Hunger {}/100", world.player.hunger))],
+        SidebarSection::Stats => {
+            let stats = world.player.stats;
+            vec![
+                Line::raw(format!("STR {}  DEX {}", stats.strength, stats.dexterity)),
+                Line::raw(format!("INT {}  PER {}", stats.intelligence, stats.perception)),
+            ]
+        }
+        SidebarSection::Wielded => vec![Line::raw(match &world.player.wielded {
+            Some(item) => format!("Wield: {}", item.name),
+            None => "Wield: -".to_string(),
+        })],
+        SidebarSection::Compass => Vec::new(), // filled in by draw_sidebar, which has `visible`
+    }
+}
+
+fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, visible: &VisibleSet, area: Rect) {
+    let mut lines = vec![Line::raw(format!("{}  ({})", format_clock(world.turn), world.player.name))];
     if let Some(message) = &world.last_message {
         lines.push(Line::styled(message.clone(), Style::default().add_modifier(Modifier::ITALIC)));
     }
     lines.push(Line::raw(""));
-    for (bp, part) in world.player.health.parts() {
-        lines.push(hp_line(bp, part, world.player.self_aware));
+
+    for section in &display.sidebar_order {
+        if *section == SidebarSection::Compass {
+            lines.extend(compass_lines(world, visible));
+        } else {
+            lines.extend(section_lines(*section, world));
+        }
+        lines.push(Line::raw(""));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::raw(format!("Hunger {}/100", world.player.hunger)));
-    lines.push(Line::raw(""));
-    let stats = world.player.stats;
-    lines.push(Line::raw(format!("STR {}  DEX {}", stats.strength, stats.dexterity)));
-    lines.push(Line::raw(format!("INT {}  PER {}", stats.intelligence, stats.perception)));
-    lines.push(Line::raw(""));
-    lines.push(Line::raw(match &world.player.wielded {
-        Some(item) => format!("Wield: {}", item.name),
-        None => "Wield: -".to_string(),
-    }));
-    lines.push(Line::raw(""));
-    lines.push(Line::raw("? help  @ skills"));
+    lines.push(Line::raw("? help  @ skills  } layout"));
 
     let border = if display.sidebar_on_left { Borders::RIGHT } else { Borders::LEFT };
     let block = Block::default().title("Scourge").borders(border);
@@ -593,15 +693,46 @@ fn draw_eat_select(frame: &mut Frame, world: &World) {
     frame.render_widget(list, popup);
 }
 
-/// 'e'/'l': a quick, cursor-free look at the player's own tile - reuses the
-/// same description logic as the free-roam 'x' look.
-fn draw_examine(frame: &mut Frame, world: &World, explored: &Explored, visible: &VisibleSet) {
+/// 'e'/'l': a description of whatever tile `ExamineDirection` picked -
+/// reuses the same description logic as the free-roam 'x' look.
+fn draw_examine(frame: &mut Frame, world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) {
     let popup = centered_rect(60, 20, frame.area());
-    let what = describe_tile(world, explored, visible, world.player.pos.x, world.player.pos.y);
+    let what = describe_tile(world, explored, visible, x, y);
     let text = format!("You see: {what}\n\n(press any key to close)");
     let paragraph = Paragraph::new(text).block(Block::default().title("Examine").borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(paragraph, popup);
+}
+
+/// Prompts for which adjacent tile to examine - a movement key picks the
+/// direction, Wait's own key examines yourself instead.
+fn draw_examine_direction(frame: &mut Frame) {
+    let popup = centered_rect(55, 20, frame.area());
+    let text = "Examine which direction? (Wait's key for yourself, Esc to cancel)";
+    let paragraph = Paragraph::new(text).block(Block::default().title("Examine").borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(paragraph, popup);
+}
+
+pub const EXAMINE_NPC_ITEMS: [&str; 3] = ["Talk", "Swap places", "Cancel"];
+
+/// The NPC found by an examine - deliberately just two real actions (Talk,
+/// Swap places) rather than a longer menu of things that don't do anything
+/// yet.
+fn draw_examine_npc(frame: &mut Frame, world: &World, npc_index: usize, selected: usize) {
+    let name = world.npcs.get(npc_index).map(|n| n.name.as_str()).unwrap_or("Someone");
+    let popup = centered_rect(50, 30, frame.area());
+    let list_items: Vec<ListItem> = EXAMINE_NPC_ITEMS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let style = if i == selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+            ListItem::new(*label).style(style)
+        })
+        .collect();
+    let list = List::new(list_items).block(Block::default().title(name).borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
 }
 
 fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {
@@ -704,6 +835,7 @@ fn draw_help(frame: &mut Frame, binds: &KeyBindings) {
         entry(binds, "Wait", Action::Wait),
         String::new(),
         "i: Inventory    m: Map    x: Look around    ?: This help".to_string(),
+        "}: Sidebar layout".to_string(),
         "Esc: Pause menu (Settings, Quit)".to_string(),
         String::new(),
         "(press any key to close)".to_string(),
@@ -711,6 +843,73 @@ fn draw_help(frame: &mut Frame, binds: &KeyBindings) {
     let popup = centered_rect(70, 70, frame.area());
     let list = List::new(lines.into_iter().map(ListItem::new).collect::<Vec<_>>())
         .block(Block::default().title("Help").borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
+/// '}': reorders the sidebar's reorderable sections. Up/Down move the
+/// cursor, -/+ move the selected section within the list - deliberately a
+/// simpler control scheme than BN's own drag-based one, since a terminal
+/// has no mouse-drag to lean on.
+fn draw_sidebar_order(frame: &mut Frame, display: &DisplaySettings, selected: usize) {
+    let popup = centered_rect(50, 40, frame.area());
+    let items: Vec<ListItem> = display
+        .sidebar_order
+        .iter()
+        .enumerate()
+        .map(|(i, section)| {
+            let style = if i == selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+            ListItem::new(section.label()).style(style)
+        })
+        .collect();
+    let list = List::new(items).block(
+        Block::default()
+            .title("Sidebar Layout (-/+ move, Esc done)")
+            .borders(Borders::ALL),
+    );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
+/// Character creation, step 1: pick a name - the very first thing shown on
+/// a new game.
+fn draw_name_entry(frame: &mut Frame, name: &str) {
+    let popup = centered_rect(50, 20, frame.area());
+    let text = format!("What's your name?\n\n{name}_\n\n(Enter to confirm)");
+    let paragraph = Paragraph::new(text).block(Block::default().title("New Character").borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(paragraph, popup);
+}
+
+const STAT_LABELS: [&str; 4] = ["Strength", "Dexterity", "Intelligence", "Perception"];
+
+fn stat_value(stats: Stats, index: usize) -> i32 {
+    match index {
+        0 => stats.strength,
+        1 => stats.dexterity,
+        2 => stats.intelligence,
+        _ => stats.perception,
+    }
+}
+
+/// Character creation, step 2: a small point-buy, not real DDA's full
+/// traits/professions/scenarios character creator - deliberately just
+/// enough to make the starting stats a real choice instead of always
+/// identical.
+fn draw_stat_allocation(frame: &mut Frame, stats: Stats, pool: i32, selected: usize) {
+    let popup = centered_rect(50, 40, frame.area());
+    let mut lines: Vec<ListItem> = STAT_LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let style = if i == selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+            ListItem::new(format!("{label:<13}{}", stat_value(stats, i))).style(style)
+        })
+        .collect();
+    lines.push(ListItem::new(""));
+    lines.push(ListItem::new(format!("Points remaining: {pool}")));
+    lines.push(ListItem::new("Left/Right adjust, Up/Down select, Enter to finish"));
+    let list = List::new(lines).block(Block::default().title("Allocate Stats").borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
 }

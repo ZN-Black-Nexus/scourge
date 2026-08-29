@@ -19,7 +19,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use keybindings::{arrow_action, KeyBindings, DIRECTIONS};
-use scourge_core::{direction_delta, Action, World};
+use scourge_core::{direction_delta, Action, Health, Stats, World};
 use scourge_render::{Camera, Explored};
 use settings::DisplaySettings;
 use ui::Screen;
@@ -104,7 +104,7 @@ pub fn run(mut world: World) -> io::Result<()> {
     let mut visible = world.map.visible_from(world.player.pos, ui::SIGHT_RADIUS);
     let mut last_turn = world.turn;
 
-    let mut screen = Screen::Game;
+    let mut screen = Screen::NameEntry { name: String::new() };
 
     loop {
         if world.turn != last_turn {
@@ -174,12 +174,14 @@ fn handle_key(
                 *screen = Screen::Help;
             } else if code == KeyCode::Char('@') {
                 *screen = Screen::Skills;
+            } else if code == KeyCode::Char('}') {
+                *screen = Screen::SidebarOrder { selected: 0 };
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 match action {
                     // UI-only - never reach world.step, just switch screens.
                     Action::OpenWieldMenu => *screen = Screen::WieldSelect,
                     Action::OpenDropMenu => *screen = Screen::DropSelect,
-                    Action::OpenExamine => *screen = Screen::Examine,
+                    Action::OpenExamine => *screen = Screen::ExamineDirection,
                     Action::OpenEatMenu => *screen = Screen::EatSelect,
                     _ => {
                         if !world.step(action) {
@@ -194,10 +196,50 @@ fn handle_key(
                 *screen = Screen::Game;
             }
         }
-        Screen::Examine | Screen::Help => {
+        Screen::Examine { .. } | Screen::Help => {
             // Dismissed by any key, matching DDA's message-prompt feel.
             *screen = Screen::Game;
         }
+        Screen::ExamineDirection => {
+            if code == KeyCode::Esc {
+                *screen = Screen::Game;
+            } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
+                match action {
+                    Action::Wait => {
+                        *screen = Screen::Examine { x: world.player.pos.x, y: world.player.pos.y };
+                    }
+                    Action::Move(dir) => {
+                        let (dx, dy) = direction_delta(dir);
+                        let (x, y) = (world.player.pos.x + dx, world.player.pos.y + dy);
+                        *screen = match world.npc_index_at(x, y) {
+                            Some(npc_index) => Screen::ExamineNpc { npc_index, selected: 0 },
+                            None => Screen::Examine { x, y },
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Screen::ExamineNpc { npc_index, selected } => match code {
+            KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                *selected = (*selected + 1).min(ui::EXAMINE_NPC_ITEMS.len() - 1)
+            }
+            KeyCode::Esc => *screen = Screen::Game,
+            KeyCode::Enter => {
+                match *selected {
+                    0 => {
+                        world.step(Action::Talk(*npc_index));
+                    }
+                    1 => {
+                        world.step(Action::SwapPlaces(*npc_index));
+                    }
+                    _ => {}
+                }
+                *screen = Screen::Game;
+            }
+            _ => {}
+        },
         Screen::WieldSelect => {
             if code == KeyCode::Esc {
                 *screen = Screen::Game;
@@ -317,6 +359,211 @@ fn handle_key(
             }
             *screen = Screen::CustomBinds { selected: idx };
         }
+        Screen::SidebarOrder { selected } => {
+            let len = display.sidebar_order.len();
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1).min(len - 1),
+                KeyCode::Char('-') if *selected > 0 => {
+                    display.sidebar_order.swap(*selected, *selected - 1);
+                    *selected -= 1;
+                    let _ = display.save(settings_path);
+                }
+                KeyCode::Char('+') | KeyCode::Char('=') if *selected + 1 < len => {
+                    display.sidebar_order.swap(*selected, *selected + 1);
+                    *selected += 1;
+                    let _ = display.save(settings_path);
+                }
+                KeyCode::Esc => *screen = Screen::Game,
+                _ => {}
+            }
+        }
+        Screen::NameEntry { name } => match code {
+            KeyCode::Char(c) if c.is_ascii_graphic() || c == ' ' => {
+                if name.len() < 20 {
+                    name.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                name.pop();
+            }
+            KeyCode::Enter => {
+                let chosen = if name.trim().is_empty() { "Survivor".to_string() } else { name.clone() };
+                world.player.name = chosen;
+                *screen = Screen::StatAllocation { stats: Stats::default(), pool: 4, selected: 0 };
+            }
+            _ => {}
+        },
+        Screen::StatAllocation { stats, pool, selected } => {
+            let get = |s: &Stats, i: usize| match i {
+                0 => s.strength,
+                1 => s.dexterity,
+                2 => s.intelligence,
+                _ => s.perception,
+            };
+            let set = |s: &mut Stats, i: usize, v: i32| match i {
+                0 => s.strength = v,
+                1 => s.dexterity = v,
+                2 => s.intelligence = v,
+                _ => s.perception = v,
+            };
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1).min(3),
+                KeyCode::Left | KeyCode::Char('h') => {
+                    let current = get(stats, *selected);
+                    if current > 4 {
+                        set(stats, *selected, current - 1);
+                        *pool += 1;
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    let current = get(stats, *selected);
+                    if *pool > 0 && current < 14 {
+                        set(stats, *selected, current + 1);
+                        *pool -= 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    world.player.stats = *stats;
+                    world.player.health = Health::from_strength(stats.strength);
+                    *screen = Screen::Game;
+                }
+                KeyCode::Esc => *screen = Screen::NameEntry { name: world.player.name.clone() },
+                _ => {}
+            }
+        }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scourge_core::{Map, Tile};
+    use settings::SidebarSection;
+
+    fn test_world() -> World {
+        World::new(Map::new(20, 20, Tile::Floor))
+    }
+
+    fn tmp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("scourge-test-{name}-{}.json", std::process::id()))
+    }
+
+    #[test]
+    fn character_creation_flow_sets_name_and_spent_stats() {
+        let mut world = test_world();
+        let mut screen = Screen::NameEntry { name: String::new() };
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-a");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-a");
+
+        for c in "Riko".chars() {
+            handle_key(KeyCode::Char(c), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        }
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert_eq!(world.player.name, "Riko");
+        assert!(matches!(screen, Screen::StatAllocation { .. }));
+
+        // Spend 2 points into Strength (selected index 0 by default).
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        if let Screen::StatAllocation { stats, pool, .. } = &screen {
+            assert_eq!(stats.strength, 10);
+            assert_eq!(*pool, 2);
+        } else {
+            panic!("expected StatAllocation");
+        }
+
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(matches!(screen, Screen::Game));
+        assert_eq!(world.player.stats.strength, 10);
+        assert_eq!(world.player.health.total().1, Health::from_strength(10).total().1);
+    }
+
+    #[test]
+    fn empty_name_defaults_to_survivor() {
+        let mut world = test_world();
+        let mut screen = Screen::NameEntry { name: String::new() };
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-b");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-b");
+
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert_eq!(world.player.name, "Survivor");
+    }
+
+    #[test]
+    fn examine_direction_finds_an_adjacent_npc_and_talk_reaches_world_step() {
+        let mut world = test_world();
+        world.player.pos = scourge_core::Pos { x: 5, y: 5 };
+        world.npcs.push(scourge_core::Npc::new("Ally", scourge_core::Pos { x: 6, y: 5 }, scourge_core::Attitude::Friendly));
+
+        let mut screen = Screen::ExamineDirection;
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-c");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-c");
+
+        // 'l' is East in the vi preset.
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(matches!(screen, Screen::ExamineNpc { npc_index: 0, selected: 0 }));
+
+        // Enter on the default selection (Talk) should reach World::step.
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(matches!(screen, Screen::Game));
+        assert_eq!(world.last_message.as_deref(), Some("\"Hey there.\" - Ally"));
+    }
+
+    #[test]
+    fn examine_direction_on_empty_tile_shows_plain_examine() {
+        let mut world = test_world();
+        world.player.pos = scourge_core::Pos { x: 5, y: 5 };
+
+        let mut screen = Screen::ExamineDirection;
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-d");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-d");
+
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(matches!(screen, Screen::Examine { x: 6, y: 5 }));
+    }
+
+    #[test]
+    fn sidebar_order_plus_swaps_the_selected_section_downward_and_persists() {
+        let mut world = test_world();
+        let mut screen = Screen::SidebarOrder { selected: 0 };
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-e");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-e");
+        let _ = std::fs::remove_file(&settings_path);
+
+        assert_eq!(display.sidebar_order[0], SidebarSection::Health);
+        handle_key(KeyCode::Char('+'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert_eq!(display.sidebar_order[0], SidebarSection::Hunger);
+        assert_eq!(display.sidebar_order[1], SidebarSection::Health);
+        assert!(matches!(screen, Screen::SidebarOrder { selected: 1 }));
+
+        let reloaded = DisplaySettings::load(&settings_path).expect("save should have written the file");
+        assert_eq!(reloaded.sidebar_order[0], SidebarSection::Hunger);
+        let _ = std::fs::remove_file(&settings_path);
+    }
+
+    #[test]
+    fn game_screen_opens_sidebar_order_on_curly_brace() {
+        let mut world = test_world();
+        let mut screen = Screen::Game;
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-f");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-f");
+
+        handle_key(KeyCode::Char('}'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(matches!(screen, Screen::SidebarOrder { selected: 0 }));
+    }
 }
