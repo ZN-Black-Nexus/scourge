@@ -401,23 +401,146 @@ impl Default for Stats {
     }
 }
 
-/// A single HP pool - deliberately simpler than DDA/BN's per-body-part
-/// health, matching the project's own "much simpler than BN" design goal.
-/// No damage sources or regeneration exist yet, so this just sits at max
-/// until combat (or anything else) is built to change it.
+/// The six main body parts, matching real DDA (which also splits out
+/// hands/feet/eyes/mouth as separate parts - left out here since nothing
+/// yet needs that finer granularity, e.g. no called-shots or encumbrance
+/// system; easy to add later without disturbing this).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BodyPart {
+    Head,
+    Torso,
+    LeftArm,
+    RightArm,
+    LeftLeg,
+    RightLeg,
+}
+
+impl BodyPart {
+    pub const ALL: [BodyPart; 6] = [
+        BodyPart::Head,
+        BodyPart::Torso,
+        BodyPart::LeftArm,
+        BodyPart::RightArm,
+        BodyPart::LeftLeg,
+        BodyPart::RightLeg,
+    ];
+
+    /// Real DDA: losing your head or torso kills you; losing a limb just
+    /// disables it.
+    pub fn is_vital(self) -> bool {
+        matches!(self, BodyPart::Head | BodyPart::Torso)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BodyPart::Head => "Head",
+            BodyPart::Torso => "Torso",
+            BodyPart::LeftArm => "L Arm",
+            BodyPart::RightArm => "R Arm",
+            BodyPart::LeftLeg => "L Leg",
+            BodyPart::RightLeg => "R Leg",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Health {
+pub struct PartHealth {
     pub current: i32,
     pub max: i32,
 }
 
+impl PartHealth {
+    fn new(max: i32) -> Self {
+        PartHealth { current: max, max }
+    }
+
+    pub fn is_broken(self) -> bool {
+        self.current <= 0
+    }
+}
+
+/// Per-body-part health, matching real DDA/BN instead of a single HP pool -
+/// losing an arm doesn't kill you, losing your torso does. No damage
+/// sources or regeneration exist yet (nothing currently calls `damage` or
+/// `heal`), so every part just sits at max until combat or anything else
+/// is built to change it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Health {
+    pub head: PartHealth,
+    pub torso: PartHealth,
+    pub left_arm: PartHealth,
+    pub right_arm: PartHealth,
+    pub left_leg: PartHealth,
+    pub right_leg: PartHealth,
+}
+
 impl Health {
-    /// A simple linear scale-up from strength, echoing (without copying)
-    /// DDA's own HP-from-strength relationship. Placeholder formula - easy
-    /// to retune once there's actual damage to balance against.
+    /// Real DDA's base_hp is a flat 60 per part at average (8) strength,
+    /// scaling from there - the exact per-part formula in the real game is
+    /// more involved than this; easy to retune once there's actual damage
+    /// to balance against.
     pub fn from_strength(strength: i32) -> Self {
-        let max = 60 + strength * 5;
-        Health { current: max, max }
+        let max = (60 + (strength - 8) * 3).max(20);
+        let part = PartHealth::new(max);
+        Health {
+            head: part,
+            torso: part,
+            left_arm: part,
+            right_arm: part,
+            left_leg: part,
+            right_leg: part,
+        }
+    }
+
+    pub fn part(&self, bp: BodyPart) -> PartHealth {
+        match bp {
+            BodyPart::Head => self.head,
+            BodyPart::Torso => self.torso,
+            BodyPart::LeftArm => self.left_arm,
+            BodyPart::RightArm => self.right_arm,
+            BodyPart::LeftLeg => self.left_leg,
+            BodyPart::RightLeg => self.right_leg,
+        }
+    }
+
+    fn part_mut(&mut self, bp: BodyPart) -> &mut PartHealth {
+        match bp {
+            BodyPart::Head => &mut self.head,
+            BodyPart::Torso => &mut self.torso,
+            BodyPart::LeftArm => &mut self.left_arm,
+            BodyPart::RightArm => &mut self.right_arm,
+            BodyPart::LeftLeg => &mut self.left_leg,
+            BodyPart::RightLeg => &mut self.right_leg,
+        }
+    }
+
+    /// Applies damage to one part, clamped at 0. Returns true if this was a
+    /// killing blow (a vital part reaching 0) - matching DDA, where a
+    /// broken limb disables it but only head/torso loss is lethal.
+    pub fn damage(&mut self, bp: BodyPart, amount: i32) -> bool {
+        let part = self.part_mut(bp);
+        part.current = (part.current - amount).max(0);
+        part.current == 0 && bp.is_vital()
+    }
+
+    pub fn heal(&mut self, bp: BodyPart, amount: i32) {
+        let part = self.part_mut(bp);
+        part.current = (part.current + amount).min(part.max);
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.head.is_broken() || self.torso.is_broken()
+    }
+
+    pub fn parts(&self) -> [(BodyPart, PartHealth); 6] {
+        BodyPart::ALL.map(|bp| (bp, self.part(bp)))
+    }
+
+    /// A single aggregate (current, max) summed across all parts - handy
+    /// for a compact status-line number when the full per-part breakdown
+    /// would be too wide to show at a glance.
+    pub fn total(&self) -> (i32, i32) {
+        self.parts().iter().fold((0, 0), |(c, m), (_, p)| (c + p.current, m + p.max))
     }
 }
 
@@ -701,6 +824,48 @@ mod tests {
         world.step(Action::Eat(0));
         assert_eq!(world.player.inventory, vec![item("Rock")], "rock is not food, nothing happens");
         assert_eq!(world.turn, 0, "no turn cost for a no-op");
+    }
+
+    #[test]
+    fn default_strength_gives_sixty_hp_per_part_matching_real_dda() {
+        let health = Health::from_strength(8);
+        for (_, part) in health.parts() {
+            assert_eq!(part, PartHealth { current: 60, max: 60 });
+        }
+    }
+
+    #[test]
+    fn losing_a_limb_does_not_kill_but_losing_torso_or_head_does() {
+        let mut health = Health::from_strength(8);
+
+        let killed = health.damage(BodyPart::LeftArm, 60);
+        assert!(!killed, "a broken arm is not lethal");
+        assert!(health.left_arm.is_broken());
+        assert!(!health.is_dead());
+
+        let killed = health.damage(BodyPart::Torso, 60);
+        assert!(killed, "torso reaching 0 is a killing blow");
+        assert!(health.is_dead());
+    }
+
+    #[test]
+    fn damage_and_heal_clamp_correctly() {
+        let mut health = Health::from_strength(8);
+
+        health.damage(BodyPart::Head, 1000);
+        assert_eq!(health.head.current, 0, "clamped at 0, not negative");
+
+        health.heal(BodyPart::Head, 1000);
+        assert_eq!(health.head.current, health.head.max, "clamped at max, not over-healed");
+    }
+
+    #[test]
+    fn total_sums_current_and_max_across_all_parts() {
+        let mut health = Health::from_strength(8);
+        health.damage(BodyPart::LeftLeg, 10);
+        let (current, max) = health.total();
+        assert_eq!(max, 60 * 6);
+        assert_eq!(current, 60 * 6 - 10);
     }
 
     #[test]

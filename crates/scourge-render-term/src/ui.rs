@@ -254,9 +254,10 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &m
         Rect::new(0, 0, area.width, map_height),
     );
 
+    let (hp_current, hp_max) = world.player.health.total();
     let status = format!(
-        "turn {} HP:{}/{} hunger:{} - Esc:menu m:map x:look i:inv g:get o/c:open/close",
-        world.turn, world.player.health.current, world.player.health.max, world.player.hunger
+        "turn {} HP:{hp_current}/{hp_max} hunger:{} - Esc:menu m:map x:look i:inv g:get o/c:open/close (i for full body status)",
+        world.turn, world.player.hunger
     );
     frame.render_widget(
         Paragraph::new(status),
@@ -398,13 +399,30 @@ fn inventory_letters(inventory: &[scourge_core::Item]) -> Vec<ListItem<'static>>
         .collect()
 }
 
+/// One line per body part, e.g. "Torso: 60/60" - a broken (0 HP) limb is
+/// called out explicitly since that's a real gameplay state (disabled),
+/// not just a number.
+fn body_status_lines(world: &World) -> Vec<ListItem<'static>> {
+    world
+        .player
+        .health
+        .parts()
+        .into_iter()
+        .map(|(bp, part)| {
+            let text = format!("{}: {}/{}{}", bp.label(), part.current, part.max, if part.is_broken() { " (broken!)" } else { "" });
+            ListItem::new(text)
+        })
+        .collect()
+}
+
 fn draw_inventory(frame: &mut Frame, world: &World) {
     let popup = centered_rect(70, 70, frame.area());
     let title = format!("Inventory ({} items) - Esc to close", world.player.inventory.len());
-    let mut list_items = vec![ListItem::new(match &world.player.wielded {
+    let mut list_items = body_status_lines(world);
+    list_items.push(ListItem::new(match &world.player.wielded {
         Some(item) => format!("Wielding: {}", item.name),
         None => "Wielding: nothing".to_string(),
-    })];
+    }));
     list_items.extend(inventory_letters(&world.player.inventory));
     let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(Clear, popup);
