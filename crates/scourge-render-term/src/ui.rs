@@ -8,10 +8,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use scourge_core::{Action, Direction, Tile, TileColor, VisibleSet, World};
+use scourge_core::{hp_bar, Action, Direction, Skill, Tile, TileColor, VisibleSet, World};
 use scourge_render::{Camera, Explored};
 
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
+use crate::settings::DisplaySettings;
 
 /// Right-side status panel width, DDA/BN's classic default sidebar
 /// arrangement instead of a single line of jammed-together info at the
@@ -33,15 +34,16 @@ pub(crate) const SIGHT_RADIUS: i32 = 60;
 const NEAR_RADIUS: i32 = 20;
 
 pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
-pub const SETTINGS_ITEMS: [&str; 3] = [
-    "Movement: Vi-keys (hjkl + yubn)",
-    "Movement: WASD (wasd + qezc)",
-    "Custom keybinds...",
-];
+/// The Settings list has a dynamic 4th item (current sidebar side), so its
+/// content is built in `draw_settings`; this is just the nav bound.
+pub const SETTINGS_ITEM_COUNT: usize = 4;
 
 pub enum Screen {
     Game,
     Inventory,
+    /// '@': all 27 skills and their levels - a plain list for now, no
+    /// selection/interaction since nothing yet trains or checks them.
+    Skills,
     /// 'w'/'h' (preset-dependent): pick an inventory letter to wield, or
     /// '-' to empty your hands.
     WieldSelect,
@@ -73,6 +75,7 @@ pub fn draw(
     world: &World,
     screen: &Screen,
     binds: &KeyBindings,
+    display: &DisplaySettings,
     camera: &mut Camera,
     explored: &mut Explored,
     visible: &VisibleSet,
@@ -82,17 +85,18 @@ pub fn draw(
             draw_look(frame, world, explored, visible, *cursor_x, *cursor_y)
         }
         Screen::Map { cam_x, cam_y } => draw_map_screen(frame, world, explored, *cam_x, *cam_y),
-        _ => draw_game(frame, world, camera, explored, visible),
+        _ => draw_game(frame, world, display, camera, explored, visible),
     }
     match screen {
         Screen::Game | Screen::Look { .. } | Screen::Map { .. } => {}
         Screen::Inventory => draw_inventory(frame, world),
+        Screen::Skills => draw_skills(frame, world),
         Screen::WieldSelect => draw_wield_select(frame, world),
         Screen::DropSelect => draw_drop_select(frame, world),
         Screen::EatSelect => draw_eat_select(frame, world),
         Screen::Examine => draw_examine(frame, world, explored, visible),
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
-        Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_ITEMS, *selected),
+        Screen::Settings { selected } => draw_settings(frame, display, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
         Screen::AwaitingKey { direction } => draw_awaiting_key(frame, *direction),
         Screen::Help => draw_help(frame, binds),
@@ -236,13 +240,29 @@ fn build_row(cells: impl Iterator<Item = (char, Style)>) -> Line<'static> {
 /// DDA/BN's classic default arrangement: a map viewport plus a persistent
 /// status sidebar, instead of the map alone with a single crammed line of
 /// info at the bottom.
-fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &mut Explored, visible: &VisibleSet) {
+fn draw_game(
+    frame: &mut Frame,
+    world: &World,
+    display: &DisplaySettings,
+    camera: &mut Camera,
+    explored: &mut Explored,
+    visible: &VisibleSet,
+) {
     let area = frame.area();
-    let columns = Layout::default()
-        .direction(LayoutDirection::Horizontal)
-        .constraints([Constraint::Min(20), Constraint::Length(SIDEBAR_WIDTH)])
-        .split(area);
-    let (map_area, sidebar_area) = (columns[0], columns[1]);
+    // The constraint *order* determines physical left/right position, so
+    // this has to flip which constraint comes first, not just relabel the
+    // resulting rects afterward.
+    let constraints = if display.sidebar_on_left {
+        [Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(20)]
+    } else {
+        [Constraint::Min(20), Constraint::Length(SIDEBAR_WIDTH)]
+    };
+    let columns = Layout::default().direction(LayoutDirection::Horizontal).constraints(constraints).split(area);
+    let (map_area, sidebar_area) = if display.sidebar_on_left {
+        (columns[1], columns[0])
+    } else {
+        (columns[0], columns[1])
+    };
 
     let (viewport_w, viewport_h) = (map_area.width as i32, map_area.height as i32);
     camera.center_on(world.player.pos, viewport_w, viewport_h, world.map.width, world.map.height);
@@ -267,19 +287,54 @@ fn draw_game(frame: &mut Frame, world: &World, camera: &mut Camera, explored: &m
         .collect();
     frame.render_widget(Paragraph::new(lines), map_area);
 
-    draw_sidebar(frame, world, sidebar_area);
+    draw_sidebar(frame, world, display, sidebar_area);
 }
 
-fn draw_sidebar(frame: &mut Frame, world: &World, area: Rect) {
-    let (hp_current, hp_max) = world.player.health.total();
-    let mut lines = vec![
-        Line::raw(format!("Turn {}", world.turn)),
-        Line::raw(format!("HP {hp_current}/{hp_max}")),
-        Line::raw(""),
-    ];
+/// One HP line, e.g. "Head  |||::" by default, or "Head   45/60" with the
+/// (not yet reachable) Self-Aware trait - matches real DDA: an idea of your
+/// condition, not exact numbers, unless something specific reveals them.
+fn hp_line(bp: scourge_core::BodyPart, part: scourge_core::PartHealth, self_aware: bool) -> Line<'static> {
+    let ratio = if part.max > 0 { part.current as f64 / part.max as f64 } else { 0.0 };
+    let reading = if self_aware {
+        format!("{:>3}/{:<3}", part.current, part.max)
+    } else {
+        hp_bar(part.current, part.max)
+    };
+    let style = Style::default().fg(hp_color(ratio));
+    Line::from(vec![
+        Span::raw(format!("{:<6}", bp.label())),
+        Span::styled(reading, style),
+        Span::raw(if part.is_broken() { " !" } else { "" }),
+    ])
+}
+
+/// Green-to-red gradient by health ratio, richer when the terminal supports
+/// it - an approximation, since DDA's exact color table wasn't available to
+/// verify byte-for-byte.
+fn hp_color(ratio: f64) -> Color {
+    let ratio = ratio.clamp(0.0, 1.0);
+    match color_support() {
+        ColorSupport::TrueColor => Color::Rgb(((1.0 - ratio) * 220.0) as u8, (ratio * 200.0) as u8, 0),
+        _ => {
+            if ratio > 0.6 {
+                Color::Green
+            } else if ratio > 0.3 {
+                Color::Yellow
+            } else {
+                Color::Red
+            }
+        }
+    }
+}
+
+fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, area: Rect) {
+    let mut lines = vec![Line::raw(format!("Turn {}", world.turn))];
+    if let Some(message) = &world.last_message {
+        lines.push(Line::styled(message.clone(), Style::default().add_modifier(Modifier::ITALIC)));
+    }
+    lines.push(Line::raw(""));
     for (bp, part) in world.player.health.parts() {
-        let broken = if part.is_broken() { " !" } else { "" };
-        lines.push(Line::raw(format!("{:<6}{:>3}/{:<3}{}", bp.label(), part.current, part.max, broken)));
+        lines.push(hp_line(bp, part, world.player.self_aware));
     }
     lines.push(Line::raw(""));
     lines.push(Line::raw(format!("Hunger {}/100", world.player.hunger)));
@@ -293,10 +348,11 @@ fn draw_sidebar(frame: &mut Frame, world: &World, area: Rect) {
         None => "Wield: -".to_string(),
     }));
     lines.push(Line::raw(""));
-    lines.push(Line::raw("? for help"));
+    lines.push(Line::raw("? help  @ skills"));
 
-    let block = Block::default().title("Scourge").borders(Borders::LEFT);
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    let border = if display.sidebar_on_left { Borders::RIGHT } else { Borders::LEFT };
+    let block = Block::default().title("Scourge").borders(border);
+    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }).block(block), area);
 }
 
 /// 'x': free-look cursor. Camera centers on the cursor instead of the
@@ -451,6 +507,19 @@ fn draw_inventory(frame: &mut Frame, world: &World) {
     frame.render_widget(list, popup);
 }
 
+/// '@': all 27 real DDA skills and their levels. Everything starts at 0 -
+/// nothing yet trains them (no combat/crafting/social systems exist).
+fn draw_skills(frame: &mut Frame, world: &World) {
+    let popup = centered_rect(60, 90, frame.area());
+    let items: Vec<ListItem> = Skill::ALL
+        .iter()
+        .map(|&skill| ListItem::new(format!("{:<16}{}", skill.label(), world.player.skills.level(skill))))
+        .collect();
+    let list = List::new(items).block(Block::default().title("Skills - Esc to close").borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
 /// 'w'/'h': pick a letter to wield, or '-' to empty your hands.
 fn draw_wield_select(frame: &mut Frame, world: &World) {
     let popup = centered_rect(70, 70, frame.area());
@@ -524,6 +593,30 @@ fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {
         })
         .collect();
     let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
+/// Same list-with-selection look as `draw_menu`, but one item's label is
+/// dynamic (current sidebar side), so it can't be a plain `&[&str]`.
+fn draw_settings(frame: &mut Frame, display: &DisplaySettings, selected: usize) {
+    let side = if display.sidebar_on_left { "Left" } else { "Right" };
+    let items = [
+        "Movement: Vi-keys (hjkl + yubn)".to_string(),
+        "Movement: WASD (wasd + qezc)".to_string(),
+        "Custom keybinds...".to_string(),
+        format!("Sidebar: {side} (Enter to switch)"),
+    ];
+    let popup = centered_rect(50, 40, frame.area());
+    let list_items: Vec<ListItem> = items
+        .into_iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let style = if i == selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+            ListItem::new(label).style(style)
+        })
+        .collect();
+    let list = List::new(list_items).block(Block::default().title("Settings").borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
 }

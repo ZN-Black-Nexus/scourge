@@ -551,6 +551,147 @@ impl Health {
     }
 }
 
+/// Real DDA hides exact HP numbers by default, showing a 5-character bar
+/// instead (`|` filled, `:` empty, `-----` for a fully destroyed part) -
+/// only the Self-Aware trait reveals precise numbers. An approximation of
+/// the real formula (couldn't verify the exact pip-rounding rule from
+/// source), but the visual language matches: an idea of your condition,
+/// not a precise readout, unless you have that trait.
+pub fn hp_bar(current: i32, max: i32) -> String {
+    if current <= 0 {
+        return "-----".to_string();
+    }
+    let ratio = if max > 0 { (current as f64 / max as f64).clamp(0.0, 1.0) } else { 0.0 };
+    let filled = ((ratio * 5.0).round() as usize).clamp(1, 5);
+    format!("{}{}", "|".repeat(filled), ":".repeat(5 - filled))
+}
+
+/// The 27 real DDA skills (a 28th, "weapon", is an internal contextual
+/// skill in the real game with no meaning to show here). All start at 0 -
+/// nothing yet trains or checks them (no combat/crafting/social systems
+/// exist), same "logic before the systems that use it" situation as
+/// hunger's threshold and health's damage sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Skill {
+    Speech,
+    Computer,
+    FirstAid,
+    Mechanics,
+    Traps,
+    Driving,
+    Swimming,
+    Fabrication,
+    Cooking,
+    Tailoring,
+    Survival,
+    Electronics,
+    Archery,
+    Gun,
+    Launcher,
+    Pistol,
+    Rifle,
+    Shotgun,
+    Smg,
+    Throw,
+    Melee,
+    Bashing,
+    Cutting,
+    Dodge,
+    Stabbing,
+    Unarmed,
+    Chemistry,
+}
+
+impl Skill {
+    pub const ALL: [Skill; 27] = [
+        Skill::Speech,
+        Skill::Computer,
+        Skill::FirstAid,
+        Skill::Mechanics,
+        Skill::Traps,
+        Skill::Driving,
+        Skill::Swimming,
+        Skill::Fabrication,
+        Skill::Cooking,
+        Skill::Tailoring,
+        Skill::Survival,
+        Skill::Electronics,
+        Skill::Archery,
+        Skill::Gun,
+        Skill::Launcher,
+        Skill::Pistol,
+        Skill::Rifle,
+        Skill::Shotgun,
+        Skill::Smg,
+        Skill::Throw,
+        Skill::Melee,
+        Skill::Bashing,
+        Skill::Cutting,
+        Skill::Dodge,
+        Skill::Stabbing,
+        Skill::Unarmed,
+        Skill::Chemistry,
+    ];
+
+    /// Matches real DDA's display names (data/json/skills.json).
+    pub fn label(self) -> &'static str {
+        match self {
+            Skill::Speech => "Speech",
+            Skill::Computer => "Computers",
+            Skill::FirstAid => "First Aid",
+            Skill::Mechanics => "Mechanics",
+            Skill::Traps => "Traps",
+            Skill::Driving => "Driving",
+            Skill::Swimming => "Swimming",
+            Skill::Fabrication => "Fabrication",
+            Skill::Cooking => "Cooking",
+            Skill::Tailoring => "Tailoring",
+            Skill::Survival => "Survival",
+            Skill::Electronics => "Electronics",
+            Skill::Archery => "Archery",
+            Skill::Gun => "Marksmanship",
+            Skill::Launcher => "Launchers",
+            Skill::Pistol => "Handguns",
+            Skill::Rifle => "Rifles",
+            Skill::Shotgun => "Shotguns",
+            Skill::Smg => "Submachine Guns",
+            Skill::Throw => "Throwing",
+            Skill::Melee => "Melee",
+            Skill::Bashing => "Bashing",
+            Skill::Cutting => "Cutting",
+            Skill::Dodge => "Dodge",
+            Skill::Stabbing => "Stabbing",
+            Skill::Unarmed => "Unarmed",
+            Skill::Chemistry => "Chemistry",
+        }
+    }
+}
+
+/// A survivor's skill levels, 0-10 like real DDA. Sparse - an untrained
+/// skill is just absent rather than stored as an explicit 0, since a fresh
+/// character starts with nearly all of them untrained.
+#[derive(Clone, Debug, Default)]
+pub struct Skills(std::collections::HashMap<Skill, u8>);
+
+impl Skills {
+    pub fn new() -> Self {
+        Skills(std::collections::HashMap::new())
+    }
+
+    pub fn level(&self, skill: Skill) -> u8 {
+        self.0.get(&skill).copied().unwrap_or(0)
+    }
+
+    pub fn set_level(&mut self, skill: Skill, level: u8) {
+        self.0.insert(skill, level.min(10));
+    }
+
+    pub fn train(&mut self, skill: Skill, amount: u8) {
+        let level = self.level(skill).saturating_add(amount).min(10);
+        self.set_level(skill, level);
+    }
+}
+
 pub struct Player {
     pub pos: Pos,
     pub inventory: Vec<Item>,
@@ -559,10 +700,15 @@ pub struct Player {
     pub wielded: Option<Item>,
     pub stats: Stats,
     pub health: Health,
+    pub skills: Skills,
     /// 0 (fully fed) to 100 (starving). Ticks up slowly over time (see
     /// `World::tick`); nothing happens yet at 100 - that's a balance
     /// decision for later, once there's a reason to tune it carefully.
     pub hunger: i32,
+    /// Real DDA's Self-Aware trait reveals exact HP numbers instead of the
+    /// abstracted bar; always false for now since there's no traits/
+    /// character-creation system yet to ever set it true.
+    pub self_aware: bool,
 }
 
 pub struct World {
@@ -570,6 +716,12 @@ pub struct World {
     pub player: Player,
     pub turn: u64,
     ground_items: std::collections::HashMap<(i32, i32), Vec<Item>>,
+    /// What the last action actually did, in plain words - e.g. "Picked up
+    /// Rock." or "Nothing here to pick up." Without this, an action that
+    /// silently fails (nothing adjacent to interact with, out of range,
+    /// etc.) gives the player no way to tell "it didn't work" apart from
+    /// "it worked but I misjudged where".
+    pub last_message: Option<String>,
 }
 
 impl World {
@@ -583,10 +735,13 @@ impl World {
                 wielded: None,
                 health: Health::from_strength(stats.strength),
                 stats,
+                skills: Skills::new(),
                 hunger: 0,
+                self_aware: false,
             },
             turn: 0,
             ground_items: std::collections::HashMap::new(),
+            last_message: None,
         };
         world.place_player_at_center();
         world
@@ -635,6 +790,9 @@ impl World {
     /// except a closed door or window sash, which auto-opens instead (also
     /// matching DDA), costing a turn but not moving you onto it yet.
     pub fn step(&mut self, action: Action) -> bool {
+        // Cleared before every action, not just left stale, so the sidebar
+        // only ever shows feedback for what just happened.
+        self.last_message = None;
         match action {
             Action::Quit => return false,
             Action::Move(dir) => {
@@ -656,41 +814,51 @@ impl World {
                     _ => {}
                 }
             }
-            Action::Open => self.toggle_nearby(|t| match t {
-                Tile::DoorClosed => Some(Tile::DoorOpen),
-                Tile::Window { open: false, curtain_open } => {
-                    Some(Tile::Window { open: true, curtain_open })
-                }
-                Tile::Window { open: true, curtain_open: false } => {
-                    Some(Tile::Window { open: true, curtain_open: true })
-                }
-                _ => None,
-            }),
-            Action::Close => self.toggle_nearby(|t| match t {
-                Tile::DoorOpen => Some(Tile::DoorClosed),
-                Tile::Window { open: true, curtain_open } => {
-                    Some(Tile::Window { open: false, curtain_open })
-                }
-                Tile::Window { open: false, curtain_open: true } => {
-                    Some(Tile::Window { open: false, curtain_open: false })
-                }
-                _ => None,
-            }),
+            Action::Open => {
+                self.toggle_nearby("Opened.", "Nothing nearby to open.", |t| match t {
+                    Tile::DoorClosed => Some(Tile::DoorOpen),
+                    Tile::Window { open: false, curtain_open } => {
+                        Some(Tile::Window { open: true, curtain_open })
+                    }
+                    Tile::Window { open: true, curtain_open: false } => {
+                        Some(Tile::Window { open: true, curtain_open: true })
+                    }
+                    _ => None,
+                });
+            }
+            Action::Close => {
+                self.toggle_nearby("Closed.", "Nothing nearby to close.", |t| match t {
+                    Tile::DoorOpen => Some(Tile::DoorClosed),
+                    Tile::Window { open: true, curtain_open } => {
+                        Some(Tile::Window { open: false, curtain_open })
+                    }
+                    Tile::Window { open: false, curtain_open: true } => {
+                        Some(Tile::Window { open: false, curtain_open: false })
+                    }
+                    _ => None,
+                });
+            }
             // Checks the player's own tile first, then the 8 adjacent ones -
             // matches real DDA, which doesn't require standing exactly on
             // an item to grab it.
             Action::PickUp => {
+                let mut found = false;
                 for (dx, dy) in std::iter::once((0, 0)).chain(ADJACENT_OFFSETS) {
                     let key = (self.player.pos.x + dx, self.player.pos.y + dy);
                     let popped = self.ground_items.get_mut(&key).and_then(Vec::pop);
                     if let Some(item) = popped {
+                        self.last_message = Some(format!("Picked up {}.", item.name));
                         self.player.inventory.push(item);
                         self.tick();
                         if self.ground_items.get(&key).is_some_and(Vec::is_empty) {
                             self.ground_items.remove(&key);
                         }
+                        found = true;
                         break;
                     }
+                }
+                if !found {
+                    self.last_message = Some("Nothing here to pick up.".to_string());
                 }
             }
             // Never actually reaches here in normal play - the render layer
@@ -700,16 +868,22 @@ impl World {
             Action::Wield(index) => {
                 if index < self.player.inventory.len() {
                     let new_wielded = self.player.inventory.remove(index);
+                    self.last_message = Some(format!("Wielding {}.", new_wielded.name));
                     if let Some(old) = self.player.wielded.replace(new_wielded) {
                         self.player.inventory.push(old);
                     }
                     self.tick();
+                } else {
+                    self.last_message = Some("Nothing to wield there.".to_string());
                 }
             }
             Action::Unwield => {
                 if let Some(old) = self.player.wielded.take() {
+                    self.last_message = Some(format!("Put away {}.", old.name));
                     self.player.inventory.push(old);
                     self.tick();
+                } else {
+                    self.last_message = Some("You have nothing wielded.".to_string());
                 }
             }
             Action::Wait => self.tick(),
@@ -719,35 +893,42 @@ impl World {
             Action::Drop(index) => {
                 if index < self.player.inventory.len() {
                     let item = self.player.inventory.remove(index);
+                    self.last_message = Some(format!("Dropped {}.", item.name));
                     self.place_item(self.player.pos.x, self.player.pos.y, item);
                     self.tick();
+                } else {
+                    self.last_message = Some("Nothing to drop there.".to_string());
                 }
             }
             Action::OpenEatMenu => {}
-            Action::Eat(index) => {
-                if let Some(item) = self.player.inventory.get(index) {
-                    if let ItemKind::Food { hunger_restored } = item.kind {
-                        self.player.hunger = (self.player.hunger - hunger_restored).max(0);
-                        self.player.inventory.remove(index);
-                        self.tick();
-                    }
+            Action::Eat(index) => match self.player.inventory.get(index).map(|i| i.kind) {
+                Some(ItemKind::Food { hunger_restored }) => {
+                    let name = self.player.inventory[index].name.clone();
+                    self.player.hunger = (self.player.hunger - hunger_restored).max(0);
+                    self.player.inventory.remove(index);
+                    self.last_message = Some(format!("Ate {name}."));
+                    self.tick();
                 }
-            }
+                _ => self.last_message = Some("You can't eat that.".to_string()),
+            },
         }
         true
     }
 
     /// Applies `transition` to the first adjacent tile it has an answer for
-    /// (fixed scan order, no way to pick among several candidates yet).
-    fn toggle_nearby(&mut self, transition: impl Fn(Tile) -> Option<Tile>) {
+    /// (fixed scan order, no way to pick among several candidates yet),
+    /// setting `last_message` to `success` or `failure` accordingly.
+    fn toggle_nearby(&mut self, success: &str, failure: &str, transition: impl Fn(Tile) -> Option<Tile>) {
         for (dx, dy) in ADJACENT_OFFSETS {
             let (x, y) = (self.player.pos.x + dx, self.player.pos.y + dy);
             if let Some(tile) = self.map.tile(x, y).and_then(&transition) {
                 self.map.set(x, y, tile);
                 self.tick();
+                self.last_message = Some(success.to_string());
                 return;
             }
         }
+        self.last_message = Some(failure.to_string());
     }
 
     /// Advances the turn counter and anything that passively changes over
@@ -878,6 +1059,26 @@ mod tests {
     }
 
     #[test]
+    fn hp_bar_shows_an_idea_not_a_number() {
+        assert_eq!(hp_bar(60, 60), "|||||");
+        assert_eq!(hp_bar(30, 60), "|||::", "half health rounds to 3 of 5 pips");
+        assert_eq!(hp_bar(1, 60), "|::::", "still shows at least one pip while alive");
+        assert_eq!(hp_bar(0, 60), "-----", "fully destroyed part");
+    }
+
+    #[test]
+    fn skills_default_to_zero_and_train_up_clamped_at_ten() {
+        let mut skills = Skills::new();
+        assert_eq!(skills.level(Skill::Survival), 0, "untrained skills default to 0");
+
+        skills.train(Skill::Survival, 3);
+        assert_eq!(skills.level(Skill::Survival), 3);
+
+        skills.set_level(Skill::Survival, 255);
+        assert_eq!(skills.level(Skill::Survival), 10, "clamped at the real DDA cap");
+    }
+
+    #[test]
     fn dropping_places_the_item_on_the_players_own_tile() {
         let map = Map::new(3, 3, Tile::Floor);
         let mut world = World::new(map);
@@ -936,6 +1137,33 @@ mod tests {
         assert_eq!(world.player.inventory, vec![Item::new("Rock")]);
         assert!(world.items_at(2, 1).is_empty());
         assert_eq!(world.turn, 1);
+    }
+
+    #[test]
+    fn actions_report_clear_feedback_including_silent_failures() {
+        let map = Map::new(3, 3, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 1, y: 1 };
+
+        // Nothing nearby: pickup, open, and close should all say so, not
+        // silently do nothing with no way to tell it failed.
+        world.step(Action::PickUp);
+        assert_eq!(world.last_message.as_deref(), Some("Nothing here to pick up."));
+
+        world.step(Action::Open);
+        assert_eq!(world.last_message.as_deref(), Some("Nothing nearby to open."));
+
+        world.step(Action::Close);
+        assert_eq!(world.last_message.as_deref(), Some("Nothing nearby to close."));
+
+        // A real pickup reports what was picked up.
+        world.place_item(1, 1, Item::new("Rock"));
+        world.step(Action::PickUp);
+        assert_eq!(world.last_message.as_deref(), Some("Picked up Rock."));
+
+        // Move doesn't set a message, and the old one doesn't linger.
+        world.step(Action::Move(Direction::East));
+        assert_eq!(world.last_message, None);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! across Windows, macOS, Linux (incl. bare tty), and Termux on Android.
 
 mod keybindings;
+mod settings;
 mod ui;
 
 use std::io;
@@ -20,6 +21,7 @@ use ratatui::Terminal;
 use keybindings::{arrow_action, KeyBindings, DIRECTIONS};
 use scourge_core::{direction_delta, Action, World};
 use scourge_render::{Camera, Explored};
+use settings::DisplaySettings;
 use ui::Screen;
 
 /// Terminal size as (width, height), with the last row reserved for the status line.
@@ -87,6 +89,8 @@ pub fn run(mut world: World) -> io::Result<()> {
 
     let config_path = PathBuf::from("config/keybindings.json");
     let mut binds = KeyBindings::load(&config_path).unwrap_or_else(|_| KeyBindings::preset_vi());
+    let settings_path = PathBuf::from("config/settings.json");
+    let mut display = DisplaySettings::load(&settings_path).unwrap_or_default();
     let mut camera = Camera::new();
     let mut explored = Explored::new(world.map.width, world.map.height);
 
@@ -107,7 +111,7 @@ pub fn run(mut world: World) -> io::Result<()> {
             visible = world.map.visible_from(world.player.pos, ui::SIGHT_RADIUS);
             last_turn = world.turn;
         }
-        terminal.draw(|frame| ui::draw(frame, &world, &screen, &binds, &mut camera, &mut explored, &visible))?;
+        terminal.draw(|frame| ui::draw(frame, &world, &screen, &binds, &display, &mut camera, &mut explored, &visible))?;
 
         // Drain every already-buffered event before rendering again. Holding
         // a key generates OS key-repeat events faster than we can draw; if we
@@ -119,7 +123,15 @@ pub fn run(mut world: World) -> io::Result<()> {
                 Event::Resize(_, _) => {}
                 Event::Mouse(MouseEvent { .. }) => {}
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if !handle_key(key.code, &mut screen, &mut world, &mut binds, &config_path) {
+                    if !handle_key(
+                        key.code,
+                        &mut screen,
+                        &mut world,
+                        &mut binds,
+                        &config_path,
+                        &mut display,
+                        &settings_path,
+                    ) {
                         return Ok(());
                     }
                 }
@@ -139,6 +151,8 @@ fn handle_key(
     world: &mut World,
     binds: &mut KeyBindings,
     config_path: &std::path::Path,
+    display: &mut DisplaySettings,
+    settings_path: &std::path::Path,
 ) -> bool {
     match screen {
         Screen::Game => {
@@ -158,6 +172,8 @@ fn handle_key(
                 *screen = Screen::Inventory;
             } else if code == KeyCode::Char('?') {
                 *screen = Screen::Help;
+            } else if code == KeyCode::Char('@') {
+                *screen = Screen::Skills;
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 match action {
                     // UI-only - never reach world.step, just switch screens.
@@ -173,7 +189,7 @@ fn handle_key(
                 }
             }
         }
-        Screen::Inventory => {
+        Screen::Inventory | Screen::Skills => {
             if code == KeyCode::Esc {
                 *screen = Screen::Game;
             }
@@ -260,7 +276,7 @@ fn handle_key(
         Screen::Settings { selected } => match code {
             KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
-                *selected = (*selected + 1).min(ui::SETTINGS_ITEMS.len() - 1)
+                *selected = (*selected + 1).min(ui::SETTINGS_ITEM_COUNT - 1)
             }
             KeyCode::Esc => *screen = Screen::Pause { selected: 1 },
             KeyCode::Enter => match *selected {
@@ -273,6 +289,10 @@ fn handle_key(
                     let _ = binds.save(config_path);
                 }
                 2 => *screen = Screen::CustomBinds { selected: 0 },
+                3 => {
+                    display.sidebar_on_left = !display.sidebar_on_left;
+                    let _ = display.save(settings_path);
+                }
                 _ => {}
             },
             _ => {}
