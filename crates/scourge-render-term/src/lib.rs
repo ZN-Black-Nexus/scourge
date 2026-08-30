@@ -134,6 +134,13 @@ pub fn run(mut world: World) -> io::Result<()> {
                     ) {
                         return Ok(());
                     }
+                    // Checked after every key, not just movement/attack
+                    // ones, since a hostile's counterattack can land
+                    // during a tick triggered by any turn-costing action
+                    // (waiting, picking something up, and so on).
+                    if world.player.health.is_dead() && !matches!(screen, Screen::GameOver) {
+                        screen = Screen::GameOver;
+                    }
                 }
                 _ => {}
             }
@@ -220,26 +227,31 @@ fn handle_key(
                 }
             }
         }
-        Screen::ExamineNpc { npc_index, selected } => match code {
-            KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => {
-                *selected = (*selected + 1).min(ui::EXAMINE_NPC_ITEMS.len() - 1)
-            }
-            KeyCode::Esc => *screen = Screen::Game,
-            KeyCode::Enter => {
-                match *selected {
-                    0 => {
-                        world.step(Action::Talk(*npc_index));
+        Screen::ExamineNpc { npc_index, selected } => {
+            let attitude = world.npcs.get(*npc_index).map(|n| n.attitude);
+            let item_count = attitude.map(ui::examine_npc_items).map_or(1, <[&str]>::len);
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1).min(item_count - 1),
+                KeyCode::Esc => *screen = Screen::Game,
+                KeyCode::Enter => {
+                    match (attitude, *selected) {
+                        (Some(scourge_core::Attitude::Friendly), 0) => {
+                            world.step(Action::Talk(*npc_index));
+                        }
+                        (Some(scourge_core::Attitude::Friendly), 1) => {
+                            world.step(Action::SwapPlaces(*npc_index));
+                        }
+                        (Some(scourge_core::Attitude::Hostile), 0) => {
+                            world.step(Action::Attack(*npc_index));
+                        }
+                        _ => {}
                     }
-                    1 => {
-                        world.step(Action::SwapPlaces(*npc_index));
-                    }
-                    _ => {}
+                    *screen = Screen::Game;
                 }
-                *screen = Screen::Game;
+                _ => {}
             }
-            _ => {}
-        },
+        }
         Screen::WieldSelect => {
             if code == KeyCode::Esc {
                 *screen = Screen::Game;
@@ -440,6 +452,7 @@ fn handle_key(
                 _ => {}
             }
         }
+        Screen::GameOver => return false,
     }
     true
 }
@@ -523,6 +536,69 @@ mod tests {
         handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
         assert!(matches!(screen, Screen::Game));
         assert_eq!(world.last_message.as_deref(), Some("\"Hey there.\" - Ally"));
+    }
+
+    #[test]
+    fn examining_a_hostile_npc_offers_attack_instead_of_talk_and_swap() {
+        let mut world = test_world();
+        world.player.pos = scourge_core::Pos { x: 5, y: 5 };
+        // Nearly-dead so the follow-up counterattack this same tick doesn't
+        // matter for this test - it's just checking the menu wires through.
+        let mut zombie = scourge_core::Npc::new("Zombie", scourge_core::Pos { x: 6, y: 5 }, scourge_core::Attitude::Hostile);
+        zombie.health.damage(scourge_core::BodyPart::Torso, 59);
+        world.npcs.push(zombie);
+
+        let mut screen = Screen::ExamineDirection;
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-g");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-g");
+
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(matches!(screen, Screen::ExamineNpc { npc_index: 0, selected: 0 }));
+
+        // Enter on the default selection (Attack, for a hostile) should
+        // reach World::step and defeat it (1 HP left, 10 damage).
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(matches!(screen, Screen::Game));
+        assert_eq!(world.last_message.as_deref(), Some("You defeated the Zombie."));
+        assert!(world.npcs.is_empty());
+    }
+
+    #[test]
+    fn waiting_next_to_a_lethal_hostile_kills_the_player() {
+        // handle_key itself never switches to Screen::GameOver - that's
+        // run()'s job, checked once per key after handle_key returns (it
+        // needs the *outer* loop since death can follow from any
+        // turn-costing action, not just this one). This test only confirms
+        // the death condition handle_key's caller checks for actually
+        // becomes true through the normal action path.
+        let mut world = test_world();
+        world.player.pos = scourge_core::Pos { x: 5, y: 5 };
+        world.player.health.damage(scourge_core::BodyPart::Torso, 55); // 5 HP left
+        world.npcs.push(scourge_core::Npc::new("Zombie", scourge_core::Pos { x: 6, y: 5 }, scourge_core::Attitude::Hostile));
+
+        let mut screen = Screen::Game;
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-h");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-h");
+
+        handle_key(KeyCode::Char('.'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(world.player.health.is_dead());
+    }
+
+    #[test]
+    fn game_over_screen_quits_on_any_key() {
+        let mut world = test_world();
+        let mut screen = Screen::GameOver;
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-i");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-i");
+
+        let keep_running = handle_key(KeyCode::Char('x'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(!keep_running);
     }
 
     #[test]

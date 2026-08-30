@@ -78,9 +78,29 @@ pub fn generate(width: i32, height: i32) -> Generated {
         // without yet knowing where the player actually landed.
         let ally_pos = find_walkable_near(&map, width / 2 + 3, height / 2);
         npcs.push(Npc::new("Ally", ally_pos, Attitude::Friendly));
+
+        scatter_zombies(&map, &mut rng, width, height, &mut npcs);
     }
 
     Generated { map, items, npcs }
+}
+
+/// A handful of hostile creatures scattered across the map, far enough
+/// from the player's own spawn point to not be an instant unfair ambush -
+/// just one creature type for now ("simple content first"), real variety
+/// is a later, targeted pass.
+fn scatter_zombies(map: &Map, rng: &mut impl Rng, width: i32, height: i32, npcs: &mut Vec<Npc>) {
+    let count = (width * height) / 4000;
+    let (cx, cy) = (width / 2, height / 2);
+    let min_spawn_distance = 20;
+    for _ in 0..count {
+        let x = rng.gen_range(1..width - 1);
+        let y = rng.gen_range(1..height - 1);
+        let far_enough = (x - cx).abs().max((y - cy).abs()) > min_spawn_distance;
+        if far_enough && (is_open_ground(map.tile(x, y)) || map.tile(x, y) == Some(Tile::Floor)) {
+            npcs.push(Npc::new("Zombie", Pos { x, y }, Attitude::Hostile));
+        }
+    }
 }
 
 /// Scans outward in expanding rings from `(x, y)` for the nearest walkable
@@ -281,11 +301,20 @@ mod tests {
 
         assert!(!generated.items.is_empty(), "expected some scattered ground items");
 
-        assert_eq!(generated.npcs.len(), 1, "expected the one guaranteed starter ally");
-        let ally = &generated.npcs[0];
+        let allies: Vec<_> = generated.npcs.iter().filter(|n| n.attitude == scourge_core::Attitude::Friendly).collect();
+        assert_eq!(allies.len(), 1, "expected the one guaranteed starter ally");
         assert!(
-            world.map.tile(ally.pos.x, ally.pos.y).unwrap().is_walkable(),
+            world.map.tile(allies[0].pos.x, allies[0].pos.y).unwrap().is_walkable(),
             "the ally must spawn on a walkable tile too"
         );
+
+        let zombies: Vec<_> = generated.npcs.iter().filter(|n| n.attitude == scourge_core::Attitude::Hostile).collect();
+        assert!(!zombies.is_empty(), "expected some scattered hostiles on a map this size");
+        for zombie in &zombies {
+            assert!(
+                world.map.tile(zombie.pos.x, zombie.pos.y).unwrap().is_walkable(),
+                "every zombie must spawn on a walkable tile"
+            );
+        }
     }
 }

@@ -122,6 +122,13 @@ pub enum Action {
     /// for real dialogue trees, which don't exist yet. No-ops (with a
     /// message) if the NPC isn't actually adjacent.
     Talk(usize),
+    /// Melee-attacks the NPC at this index - reached by walking into a
+    /// hostile one, real DDA's own bump-to-attack convention, not a
+    /// separate menu. Deliberately just a flat guaranteed hit for now: no
+    /// accuracy/dodge/weapon-damage system yet, matching "simple content
+    /// first" - those are real DDA-depth additions for later, once combat
+    /// existing at all is confirmed to work.
+    Attack(usize),
 }
 
 /// Backend-agnostic terrain color name. `scourge-core` has no rendering
@@ -850,6 +857,16 @@ const FOLLOW_DISTANCE: i32 = 3;
 /// building, far short of scanning a meaningful fraction of a real map.
 const NPC_PATHFIND_BUDGET: usize = 2000;
 
+/// How far away a hostile notices the player and starts closing in - no
+/// line-of-sight/stealth check yet, just distance, matching "simple first".
+const HOSTILE_DETECTION_RADIUS: i32 = 15;
+
+/// Flat, guaranteed damage per hit in both directions - no accuracy/dodge/
+/// weapon-damage system yet. Always lands on the torso for the same
+/// reason: simplest thing that makes combat exist at all.
+const PLAYER_ATTACK_DAMAGE: i32 = 10;
+const HOSTILE_ATTACK_DAMAGE: i32 = 5;
+
 pub struct World {
     pub map: Map,
     pub player: Player,
@@ -960,8 +977,12 @@ impl World {
             Action::Move(dir) => {
                 let (dx, dy) = direction_delta(dir);
                 let (nx, ny) = (self.player.pos.x + dx, self.player.pos.y + dy);
-                if let Some(npc) = self.npc_at(nx, ny) {
-                    self.last_message = Some(format!("{} is in the way.", npc.name));
+                if let Some(index) = self.npc_index_at(nx, ny) {
+                    if self.npcs[index].attitude == Attitude::Hostile {
+                        self.attack_npc(index);
+                    } else {
+                        self.last_message = Some(format!("{} is in the way.", self.npcs[index].name));
+                    }
                     return true;
                 }
                 match self.map.tile(nx, ny) {
@@ -1101,6 +1122,13 @@ impl World {
                     Some("They're not close enough for that.".to_string())
                 };
             }
+            Action::Attack(index) => {
+                if index < self.npcs.len() {
+                    self.attack_npc(index);
+                } else {
+                    self.last_message = Some("There's nothing there to attack.".to_string());
+                }
+            }
         }
         true
     }
@@ -1135,25 +1163,35 @@ impl World {
 
     /// Every NPC gets one simple action per turn, run right alongside the
     /// player's own turn-costing actions - this is deliberately far simpler
-    /// than DDA/BN's real NPC AI: a friendly NPC just closes the distance
+    /// than DDA/BN's real NPC AI. A friendly NPC just closes the distance
     /// to the player when it's wandered off past `FOLLOW_DISTANCE`, one
-    /// tile at a time, routing around obstacles via `Map::find_path`
-    /// rather than a naive straight-line step (which used to get an ally
-    /// stuck on the first corner it walked into - a real bug report, not
-    /// a hypothetical). If no path turns up within the search budget (out
-    /// of the ally's own doing, or genuinely unreachable), it just holds
-    /// position for that turn rather than erroring. Hostile NPCs don't act
-    /// yet; that's the enemy-AI phase this is groundwork for.
+    /// tile at a time; a hostile one does the same but all the way to
+    /// adjacent (no holding distance) once the player comes within
+    /// `HOSTILE_DETECTION_RADIUS`, and attacks instead of moving once it's
+    /// there. Both route around obstacles via `Map::find_path` rather than
+    /// a naive straight-line step (which used to get an ally stuck on the
+    /// first corner it walked into - a real bug report, not a
+    /// hypothetical). If no path turns up within the search budget (out of
+    /// the NPC's own doing, or genuinely unreachable), it just holds
+    /// position for that turn rather than erroring.
     fn update_npcs(&mut self) {
+        let mut attackers = Vec::new();
         for i in 0..self.npcs.len() {
-            if self.npcs[i].attitude != Attitude::Friendly {
-                continue;
-            }
             let pos = self.npcs[i].pos;
             let (dx, dy) = (self.player.pos.x - pos.x, self.player.pos.y - pos.y);
-            if dx * dx + dy * dy <= FOLLOW_DISTANCE * FOLLOW_DISTANCE {
-                continue;
+            let dist_sq = dx * dx + dy * dy;
+
+            match self.npcs[i].attitude {
+                Attitude::Friendly if dist_sq <= FOLLOW_DISTANCE * FOLLOW_DISTANCE => continue,
+                Attitude::Friendly => {}
+                Attitude::Hostile if dist_sq <= 2 => {
+                    attackers.push(i);
+                    continue;
+                }
+                Attitude::Hostile if dist_sq > HOSTILE_DETECTION_RADIUS * HOSTILE_DETECTION_RADIUS => continue,
+                Attitude::Hostile => {}
             }
+
             let next = self.map.find_path(pos, self.player.pos, NPC_PATHFIND_BUDGET).and_then(|path| path.get(1).copied());
             if let Some(next) = next {
                 if !self.actor_at(next.x, next.y, i) {
@@ -1161,6 +1199,33 @@ impl World {
                 }
             }
         }
+        for i in attackers {
+            self.hostile_attacks_player(i);
+        }
+    }
+
+    /// The player attacking an NPC - reached either by bumping into a
+    /// hostile one or via `Action::Attack` from the examine menu. Flat
+    /// guaranteed damage to the torso, no accuracy/dodge/weapon-damage
+    /// system yet (see `Action::Attack`'s doc comment).
+    fn attack_npc(&mut self, index: usize) {
+        let name = self.npcs[index].name.clone();
+        let lethal = self.npcs[index].health.damage(BodyPart::Torso, PLAYER_ATTACK_DAMAGE);
+        if lethal {
+            self.last_message = Some(format!("You defeated the {name}."));
+            self.npcs.remove(index);
+        } else {
+            self.last_message = Some(format!("You hit the {name} for {PLAYER_ATTACK_DAMAGE} damage."));
+        }
+        self.tick();
+    }
+
+    /// A hostile NPC attacking the player, called from `update_npcs` once
+    /// it's adjacent - same flat-damage simplicity as `attack_npc`.
+    fn hostile_attacks_player(&mut self, index: usize) {
+        let name = self.npcs[index].name.clone();
+        self.player.health.damage(BodyPart::Torso, HOSTILE_ATTACK_DAMAGE);
+        self.last_message = Some(format!("The {name} hits you for {HOSTILE_ATTACK_DAMAGE} damage."));
     }
 }
 
@@ -1640,13 +1705,68 @@ mod tests {
     }
 
     #[test]
-    fn hostile_npcs_do_not_move_yet() {
+    fn hostile_npc_closes_in_once_within_detection_radius() {
         let map = Map::new(30, 30, Tile::Floor);
         let mut world = World::new(map);
         world.player.pos = Pos { x: 15, y: 15 };
-        world.npcs.push(Npc::new("Raider", Pos { x: 5, y: 15 }, Attitude::Hostile));
+        world.npcs.push(Npc::new("Zombie", Pos { x: 5, y: 15 }, Attitude::Hostile));
 
         world.step(Action::Wait);
-        assert_eq!(world.npcs[0].pos, Pos { x: 5, y: 15 }, "enemy AI isn't built yet - hostiles are inert");
+        assert_eq!(world.npcs[0].pos, Pos { x: 6, y: 15 }, "within detection radius, should step toward the player");
+    }
+
+    #[test]
+    fn hostile_npc_ignores_the_player_outside_detection_radius() {
+        let map = Map::new(60, 60, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 30, y: 30 };
+        world.npcs.push(Npc::new("Zombie", Pos { x: 0, y: 30 }, Attitude::Hostile));
+
+        world.step(Action::Wait);
+        assert_eq!(world.npcs[0].pos, Pos { x: 0, y: 30 }, "far outside detection radius, should stay put");
+    }
+
+    #[test]
+    fn adjacent_hostile_attacks_the_player_instead_of_moving() {
+        let map = Map::new(10, 10, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 5, y: 5 };
+        world.npcs.push(Npc::new("Zombie", Pos { x: 6, y: 5 }, Attitude::Hostile));
+
+        let hp_before = world.player.health.part(BodyPart::Torso).current;
+        world.step(Action::Wait);
+        assert_eq!(world.npcs[0].pos, Pos { x: 6, y: 5 }, "attacks in place, doesn't move onto the player");
+        assert_eq!(world.player.health.part(BodyPart::Torso).current, hp_before - 5);
+        assert!(world.last_message.as_deref().unwrap().contains("Zombie hits you"));
+    }
+
+    #[test]
+    fn bumping_into_a_hostile_npc_attacks_it_instead_of_blocking() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        world.npcs.push(Npc::new("Zombie", Pos { x: 3, y: 2 }, Attitude::Hostile));
+
+        world.step(Action::Move(Direction::East));
+        assert_eq!(world.player.pos, Pos { x: 2, y: 2 }, "attacking doesn't move you onto its tile");
+        assert_eq!(world.npcs[0].health.part(BodyPart::Torso).current, 50, "60 max - 10 damage");
+        // The zombie survives and, still adjacent, gets a same-turn
+        // counterattack via the tick() the player's own attack triggers -
+        // its message is what's left standing, not the player's swing.
+        assert_eq!(world.last_message.as_deref(), Some("The Zombie hits you for 5 damage."));
+    }
+
+    #[test]
+    fn killing_a_hostile_npc_removes_it_and_reports_the_kill() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        let mut zombie = Npc::new("Zombie", Pos { x: 3, y: 2 }, Attitude::Hostile);
+        zombie.health.damage(BodyPart::Torso, 55); // leave it at 5 HP, one hit from dead
+        world.npcs.push(zombie);
+
+        world.step(Action::Move(Direction::East));
+        assert!(world.npcs.is_empty(), "defeated NPCs are removed from the world");
+        assert_eq!(world.last_message.as_deref(), Some("You defeated the Zombie."));
     }
 }

@@ -90,6 +90,10 @@ pub enum Screen {
     /// intentionally just this much, not real DDA's full traits/
     /// professions/scenarios character creator.
     StatAllocation { stats: Stats, pool: i32, selected: usize },
+    /// The player has died - dismissed by any key, but unlike every other
+    /// dismissable popup this one quits instead of returning to the game.
+    /// No respawn/score screen yet - "simple content first".
+    GameOver,
 }
 
 pub fn draw(
@@ -127,6 +131,7 @@ pub fn draw(
         Screen::AwaitingKey { direction } => draw_awaiting_key(frame, *direction),
         Screen::Help => draw_help(frame, binds),
         Screen::SidebarOrder { selected } => draw_sidebar_order(frame, display, *selected),
+        Screen::GameOver => draw_game_over(frame),
     }
 }
 
@@ -217,13 +222,6 @@ fn player_color() -> Color {
     ratatui_color(TileColor::White)
 }
 
-/// An NPC renders as the same `@` glyph as the player - it's another
-/// survivor, not a monster - distinguished purely by color, matching how
-/// DDA tells actors apart on an ASCII display.
-fn npc_color() -> Color {
-    ratatui_color(TileColor::Yellow)
-}
-
 /// One visible cell: its glyph and style. Three tiers, from a single scan of
 /// line-of-sight and memory: bright (near, currently visible), dimmed (far
 /// but still visible - an approximation of graduated light falloff), and
@@ -236,8 +234,10 @@ fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32
     // NPCs only ever render while actually in sight, never from fog-of-war
     // memory like terrain/items do - they move, so a remembered position
     // would just as often be a lie as the truth.
-    if visible.is_visible(x, y) && world.npc_at(x, y).is_some() {
-        return ('@', Style::default().fg(npc_color()));
+    if visible.is_visible(x, y) {
+        if let Some(npc) = world.npc_at(x, y) {
+            return ('@', Style::default().fg(attitude_color(npc.attitude)));
+        }
     }
     // A ground item sitting on a tile needs its own marker - otherwise it's
     // invisible on the map, since the cell would just show plain terrain and
@@ -765,15 +765,26 @@ fn draw_examine_direction(frame: &mut Frame) {
     frame.render_widget(paragraph, popup);
 }
 
-pub const EXAMINE_NPC_ITEMS: [&str; 3] = ["Talk", "Swap places", "Cancel"];
+pub const EXAMINE_NPC_ITEMS_FRIENDLY: [&str; 3] = ["Talk", "Swap places", "Cancel"];
+pub const EXAMINE_NPC_ITEMS_HOSTILE: [&str; 2] = ["Attack", "Cancel"];
 
-/// The NPC found by an examine - deliberately just two real actions (Talk,
-/// Swap places) rather than a longer menu of things that don't do anything
-/// yet.
+/// The menu options for an examined NPC's attitude - real actions only,
+/// not a longer list of things that don't do anything yet.
+pub fn examine_npc_items(attitude: Attitude) -> &'static [&'static str] {
+    match attitude {
+        Attitude::Friendly => &EXAMINE_NPC_ITEMS_FRIENDLY,
+        Attitude::Hostile => &EXAMINE_NPC_ITEMS_HOSTILE,
+    }
+}
+
+/// The NPC found by an examine - options depend on its attitude
+/// (`examine_npc_items`).
 fn draw_examine_npc(frame: &mut Frame, world: &World, npc_index: usize, selected: usize) {
-    let name = world.npcs.get(npc_index).map(|n| n.name.as_str()).unwrap_or("Someone");
+    let npc = world.npcs.get(npc_index);
+    let name = npc.map(|n| n.name.as_str()).unwrap_or("Someone");
+    let items = npc.map(|n| examine_npc_items(n.attitude)).unwrap_or(&EXAMINE_NPC_ITEMS_HOSTILE);
     let popup = centered_rect(50, 30, frame.area());
-    let list_items: Vec<ListItem> = EXAMINE_NPC_ITEMS
+    let list_items: Vec<ListItem> = items
         .iter()
         .enumerate()
         .map(|(i, label)| {
@@ -857,6 +868,16 @@ fn draw_custom_binds(frame: &mut Frame, binds: &KeyBindings, selected: usize) {
     );
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
+}
+
+/// The player has died - no respawn/score screen yet, just an
+/// acknowledgment before quitting.
+fn draw_game_over(frame: &mut Frame) {
+    let popup = centered_rect(40, 15, frame.area());
+    let text = "You have died.\n\n(press any key to quit)";
+    let paragraph = Paragraph::new(text).block(Block::default().title("Game Over").borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(paragraph, popup);
 }
 
 fn draw_awaiting_key(frame: &mut Frame, direction: Direction) {
