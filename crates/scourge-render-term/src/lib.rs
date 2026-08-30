@@ -364,12 +364,15 @@ fn handle_key(
             match code {
                 KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1).min(len - 1),
-                KeyCode::Char('-') if *selected > 0 => {
+                // '+' raises the selected section (feels like "boost its
+                // priority"), '-' lowers it - the opposite of the first
+                // pass, which read backwards once actually used.
+                KeyCode::Char('+') | KeyCode::Char('=') if *selected > 0 => {
                     display.sidebar_order.swap(*selected, *selected - 1);
                     *selected -= 1;
                     let _ = display.save(settings_path);
                 }
-                KeyCode::Char('+') | KeyCode::Char('=') if *selected + 1 < len => {
+                KeyCode::Char('-') if *selected + 1 < len => {
                     display.sidebar_order.swap(*selected, *selected + 1);
                     *selected += 1;
                     let _ = display.save(settings_path);
@@ -534,9 +537,10 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_order_plus_swaps_the_selected_section_downward_and_persists() {
+    fn sidebar_order_plus_raises_and_minus_lowers_the_selected_section() {
         let mut world = test_world();
-        let mut screen = Screen::SidebarOrder { selected: 0 };
+        // Start on Hunger (index 1): '+' should raise it above Health.
+        let mut screen = Screen::SidebarOrder { selected: 1 };
         let mut binds = KeyBindings::preset_vi();
         let config_path = tmp_path("binds-e");
         let mut display = DisplaySettings::default();
@@ -544,13 +548,21 @@ mod tests {
         let _ = std::fs::remove_file(&settings_path);
 
         assert_eq!(display.sidebar_order[0], SidebarSection::Health);
+        assert_eq!(display.sidebar_order[1], SidebarSection::Hunger);
         handle_key(KeyCode::Char('+'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
         assert_eq!(display.sidebar_order[0], SidebarSection::Hunger);
         assert_eq!(display.sidebar_order[1], SidebarSection::Health);
-        assert!(matches!(screen, Screen::SidebarOrder { selected: 1 }));
+        assert!(matches!(screen, Screen::SidebarOrder { selected: 0 }));
 
         let reloaded = DisplaySettings::load(&settings_path).expect("save should have written the file");
         assert_eq!(reloaded.sidebar_order[0], SidebarSection::Hunger);
+
+        // '-' should lower it right back below Health.
+        handle_key(KeyCode::Char('-'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert_eq!(display.sidebar_order[0], SidebarSection::Health);
+        assert_eq!(display.sidebar_order[1], SidebarSection::Hunger);
+        assert!(matches!(screen, Screen::SidebarOrder { selected: 1 }));
+
         let _ = std::fs::remove_file(&settings_path);
     }
 

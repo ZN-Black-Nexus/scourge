@@ -266,6 +266,54 @@ impl Map {
         self.tile(x, y).map(Tile::is_transparent).unwrap_or(true)
     }
 
+    /// Shortest walkable path from `from` to `to`, 8-directional. Every
+    /// step costs the same, so breadth-first search already finds the
+    /// shortest path - no need for A*'s extra heuristic bookkeeping.
+    /// Capped at `max_nodes` tiles explored so a distant or truly
+    /// unreachable target can't make this expensive: enough headroom to
+    /// route around a whole building, nowhere near enough to scan a
+    /// meaningful fraction of a real map.
+    pub fn find_path(&self, from: Pos, to: Pos, max_nodes: usize) -> Option<Vec<Pos>> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        if from == to {
+            return Some(vec![from]);
+        }
+        let mut visited: HashSet<(i32, i32)> = HashSet::new();
+        let mut came_from: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+        let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
+        visited.insert((from.x, from.y));
+        queue.push_back((from.x, from.y));
+        let mut explored = 0;
+
+        while let Some((cx, cy)) = queue.pop_front() {
+            explored += 1;
+            if explored > max_nodes {
+                return None;
+            }
+            for (dx, dy) in ADJACENT_OFFSETS {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if visited.contains(&(nx, ny)) || !self.tile(nx, ny).is_some_and(Tile::is_walkable) {
+                    continue;
+                }
+                visited.insert((nx, ny));
+                came_from.insert((nx, ny), (cx, cy));
+                if (nx, ny) == (to.x, to.y) {
+                    let mut path = vec![(nx, ny)];
+                    let mut cur = (nx, ny);
+                    while let Some(&prev) = came_from.get(&cur) {
+                        path.push(prev);
+                        cur = prev;
+                    }
+                    path.reverse();
+                    return Some(path.into_iter().map(|(x, y)| Pos { x, y }).collect());
+                }
+                queue.push_back((nx, ny));
+            }
+        }
+        None
+    }
+
     /// The glyph to draw at (x, y). Walls pick a Unicode box-drawing
     /// character based on which neighbors are also walls, so a building's
     /// perimeter reads as a continuous outline instead of a field of '#'.
@@ -797,6 +845,11 @@ impl Npc {
 /// crowding onto the player's own tile or trailing far behind out of sight.
 const FOLLOW_DISTANCE: i32 = 3;
 
+/// How many tiles `Map::find_path` may explore while routing a friendly
+/// NPC toward the player - comfortably enough to route around a whole
+/// building, far short of scanning a meaningful fraction of a real map.
+const NPC_PATHFIND_BUDGET: usize = 2000;
+
 pub struct World {
     pub map: Map,
     pub player: Player,
@@ -1084,10 +1137,13 @@ impl World {
     /// player's own turn-costing actions - this is deliberately far simpler
     /// than DDA/BN's real NPC AI: a friendly NPC just closes the distance
     /// to the player when it's wandered off past `FOLLOW_DISTANCE`, one
-    /// tile at a time, and does nothing else (no pathfinding around
-    /// obstacles - it can get stuck behind them, which is an accepted
-    /// limitation of this first pass). Hostile NPCs don't act yet; that's
-    /// the enemy-AI phase this is groundwork for.
+    /// tile at a time, routing around obstacles via `Map::find_path`
+    /// rather than a naive straight-line step (which used to get an ally
+    /// stuck on the first corner it walked into - a real bug report, not
+    /// a hypothetical). If no path turns up within the search budget (out
+    /// of the ally's own doing, or genuinely unreachable), it just holds
+    /// position for that turn rather than erroring. Hostile NPCs don't act
+    /// yet; that's the enemy-AI phase this is groundwork for.
     fn update_npcs(&mut self) {
         for i in 0..self.npcs.len() {
             if self.npcs[i].attitude != Attitude::Friendly {
@@ -1098,9 +1154,11 @@ impl World {
             if dx * dx + dy * dy <= FOLLOW_DISTANCE * FOLLOW_DISTANCE {
                 continue;
             }
-            let (nx, ny) = (pos.x + dx.signum(), pos.y + dy.signum());
-            if self.map.tile(nx, ny).is_some_and(Tile::is_walkable) && !self.actor_at(nx, ny, i) {
-                self.npcs[i].pos = Pos { x: nx, y: ny };
+            let next = self.map.find_path(pos, self.player.pos, NPC_PATHFIND_BUDGET).and_then(|path| path.get(1).copied());
+            if let Some(next) = next {
+                if !self.actor_at(next.x, next.y, i) {
+                    self.npcs[i].pos = next;
+                }
             }
         }
     }
@@ -1330,6 +1388,38 @@ mod tests {
     }
 
     #[test]
+    fn find_path_takes_the_straight_line_when_nothing_blocks_it() {
+        let map = Map::new(10, 10, Tile::Floor);
+        let path = map.find_path(Pos { x: 1, y: 1 }, Pos { x: 4, y: 1 }, 1000).unwrap();
+        assert_eq!(path.first(), Some(&Pos { x: 1, y: 1 }));
+        assert_eq!(path.last(), Some(&Pos { x: 4, y: 1 }));
+        // Diagonal movement is allowed, so 3 tiles over in a straight line
+        // is reachable in exactly 3 steps (4 positions including start).
+        assert_eq!(path.len(), 4);
+    }
+
+    #[test]
+    fn find_path_routes_around_a_wall() {
+        let mut map = Map::new(12, 12, Tile::Floor);
+        for y in 0..9 {
+            map.set(5, y, Tile::Wall);
+        }
+        let path = map.find_path(Pos { x: 2, y: 4 }, Pos { x: 8, y: 4 }, 2000).unwrap();
+        assert_eq!(path.last(), Some(&Pos { x: 8, y: 4 }));
+        assert!(path.iter().all(|p| map.tile(p.x, p.y).unwrap().is_walkable()));
+    }
+
+    #[test]
+    fn find_path_gives_up_within_budget_when_truly_unreachable() {
+        let mut map = Map::new(10, 10, Tile::Floor);
+        // Fully enclose (5,5) in a 1-tile box of walls.
+        for (dx, dy) in ADJACENT_OFFSETS {
+            map.set(5 + dx, 5 + dy, Tile::Wall);
+        }
+        assert!(map.find_path(Pos { x: 0, y: 0 }, Pos { x: 5, y: 5 }, 500).is_none());
+    }
+
+    #[test]
     fn a_corner_next_to_a_window_still_renders_as_a_corner() {
         // 3x3 building perimeter with a window replacing the top wall's
         // east neighbor of the top-left corner.
@@ -1416,6 +1506,31 @@ mod tests {
         world.step(Action::Wait);
         let after_dist = (world.player.pos.x - world.npcs[0].pos.x).abs();
         assert!(after_dist < start_dist, "should have stepped one tile closer");
+    }
+
+    #[test]
+    fn friendly_npc_routes_around_a_wall_corner_instead_of_getting_stuck() {
+        // A wall spanning most of the map's height, with a single gap near
+        // the bottom - exactly the shape of a building corner that used to
+        // trap the ally with the old straight-line-only follow logic.
+        let mut map = Map::new(12, 12, Tile::Floor);
+        for y in 0..9 {
+            map.set(5, y, Tile::Wall);
+        }
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 8, y: 4 };
+        world.npcs.push(Npc::new("Ally", Pos { x: 2, y: 4 }, Attitude::Friendly));
+
+        for _ in 0..30 {
+            world.step(Action::Wait);
+        }
+
+        let (dx, dy) = (world.player.pos.x - world.npcs[0].pos.x, world.player.pos.y - world.npcs[0].pos.y);
+        assert!(
+            dx * dx + dy * dy <= FOLLOW_DISTANCE * FOLLOW_DISTANCE,
+            "ally should have routed around the wall and caught up, ended at {:?}",
+            world.npcs[0].pos
+        );
     }
 
     #[test]

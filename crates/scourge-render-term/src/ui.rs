@@ -848,7 +848,7 @@ fn draw_help(frame: &mut Frame, binds: &KeyBindings) {
 }
 
 /// '}': reorders the sidebar's reorderable sections. Up/Down move the
-/// cursor, -/+ move the selected section within the list - deliberately a
+/// cursor, '+' raises and '-' lowers the selected section - deliberately a
 /// simpler control scheme than BN's own drag-based one, since a terminal
 /// has no mouse-drag to lean on.
 fn draw_sidebar_order(frame: &mut Frame, display: &DisplaySettings, selected: usize) {
@@ -864,7 +864,7 @@ fn draw_sidebar_order(frame: &mut Frame, display: &DisplaySettings, selected: us
         .collect();
     let list = List::new(items).block(
         Block::default()
-            .title("Sidebar Layout (-/+ move, Esc done)")
+            .title("Sidebar Layout (+ raise, - lower, Esc done)")
             .borders(Borders::ALL),
     );
     frame.render_widget(Clear, popup);
