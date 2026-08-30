@@ -98,7 +98,9 @@ fn scatter_zombies(map: &Map, rng: &mut impl Rng, width: i32, height: i32, npcs:
         let y = rng.gen_range(1..height - 1);
         let far_enough = (x - cx).abs().max((y - cy).abs()) > min_spawn_distance;
         if far_enough && (is_open_ground(map.tile(x, y)) || map.tile(x, y) == Some(Tile::Floor)) {
-            npcs.push(Npc::new("Zombie", Pos { x, y }, Attitude::Hostile));
+            // Gray for now, matching real DDA's plainest zombie - once
+            // there's more than one kind, each gets its own color here.
+            npcs.push(Npc::new("Zombie", Pos { x, y }, Attitude::Hostile).with_glyph('Z', scourge_core::TileColor::Gray));
         }
     }
 }

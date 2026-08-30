@@ -40,6 +40,14 @@ impl SidebarSection {
     }
 }
 
+fn default_sidebar_width_percent() -> u16 {
+    25
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DisplaySettings {
     pub sidebar_on_left: bool,
@@ -51,6 +59,18 @@ pub struct DisplaySettings {
     /// still loads instead of falling back to every other default too.
     #[serde(default)]
     pub compass_abbreviate_cardinals: bool,
+    /// A percentage of the terminal's width, not a fixed column count, so
+    /// the sidebar scales with the window instead of staying visually
+    /// thinner in a wider terminal - clamped to
+    /// `[MIN_SIDEBAR_PERCENT, MAX_SIDEBAR_PERCENT]` wherever it's read.
+    #[serde(default = "default_sidebar_width_percent")]
+    pub sidebar_width_percent: u16,
+    /// Real DDA's wider default sidebar shows limbs in 2 rows of 3, not a
+    /// single column of 6 - true here means "try that, auto-collapsing to
+    /// one column if the sidebar's too narrow to fit 3 across"; false
+    /// forces the single column regardless of width.
+    #[serde(default = "default_true")]
+    pub limbs_two_rows: bool,
 }
 
 impl Default for DisplaySettings {
@@ -59,6 +79,8 @@ impl Default for DisplaySettings {
             sidebar_on_left: false,
             sidebar_order: SidebarSection::ALL.to_vec(),
             compass_abbreviate_cardinals: false,
+            sidebar_width_percent: default_sidebar_width_percent(),
+            limbs_two_rows: true,
         }
     }
 }

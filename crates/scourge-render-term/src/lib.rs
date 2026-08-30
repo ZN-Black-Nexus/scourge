@@ -351,8 +351,22 @@ fn handle_key(
                     display.compass_abbreviate_cardinals = !display.compass_abbreviate_cardinals;
                     let _ = display.save(settings_path);
                 }
+                6 => {
+                    display.limbs_two_rows = !display.limbs_two_rows;
+                    let _ = display.save(settings_path);
+                }
                 _ => {}
             },
+            KeyCode::Left if *selected == 5 => {
+                display.sidebar_width_percent =
+                    display.sidebar_width_percent.saturating_sub(ui::SIDEBAR_WIDTH_STEP).max(ui::MIN_SIDEBAR_PERCENT);
+                let _ = display.save(settings_path);
+            }
+            KeyCode::Right if *selected == 5 => {
+                display.sidebar_width_percent =
+                    (display.sidebar_width_percent + ui::SIDEBAR_WIDTH_STEP).min(ui::MAX_SIDEBAR_PERCENT);
+                let _ = display.save(settings_path);
+            }
             _ => {}
         },
         Screen::CustomBinds { selected } => match code {
@@ -642,6 +656,53 @@ mod tests {
         assert_eq!(display.sidebar_order[0], SidebarSection::Health);
         assert_eq!(display.sidebar_order[1], SidebarSection::Hunger);
         assert!(matches!(screen, Screen::SidebarOrder { selected: 1 }));
+
+        let _ = std::fs::remove_file(&settings_path);
+    }
+
+    #[test]
+    fn settings_screen_adjusts_sidebar_width_with_left_right_and_clamps() {
+        let mut world = test_world();
+        let mut screen = Screen::Settings { selected: 5 };
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-j");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-j");
+        let _ = std::fs::remove_file(&settings_path);
+
+        assert_eq!(display.sidebar_width_percent, 25);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert_eq!(display.sidebar_width_percent, 30);
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert_eq!(display.sidebar_width_percent, 20);
+
+        // Clamp at the top.
+        display.sidebar_width_percent = ui::MAX_SIDEBAR_PERCENT;
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert_eq!(display.sidebar_width_percent, ui::MAX_SIDEBAR_PERCENT);
+
+        // Clamp at the bottom.
+        display.sidebar_width_percent = ui::MIN_SIDEBAR_PERCENT;
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert_eq!(display.sidebar_width_percent, ui::MIN_SIDEBAR_PERCENT);
+
+        let _ = std::fs::remove_file(&settings_path);
+    }
+
+    #[test]
+    fn settings_screen_toggles_limb_layout() {
+        let mut world = test_world();
+        let mut screen = Screen::Settings { selected: 6 };
+        let mut binds = KeyBindings::preset_vi();
+        let config_path = tmp_path("binds-k");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-k");
+        let _ = std::fs::remove_file(&settings_path);
+
+        assert!(display.limbs_two_rows);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        assert!(!display.limbs_two_rows);
 
         let _ = std::fs::remove_file(&settings_path);
     }

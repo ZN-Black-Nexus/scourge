@@ -17,10 +17,26 @@ use scourge_render::{Camera, Explored};
 use crate::keybindings::{describe_key, KeyBindings, DIRECTIONS};
 use crate::settings::{DisplaySettings, SidebarSection};
 
-/// Right-side status panel width, DDA/BN's classic default sidebar
-/// arrangement instead of a single line of jammed-together info at the
-/// bottom of the screen.
-const SIDEBAR_WIDTH: u16 = 26;
+/// DDA/BN's classic default arrangement: a status sidebar down one side,
+/// instead of a single line of jammed-together info at the bottom.
+/// `sidebar_width_percent` is a *percentage* of the terminal, not a fixed
+/// column count, so it scales with the window instead of staying visually
+/// thin in a wider terminal - clamped to a sane range either way.
+pub const MIN_SIDEBAR_PERCENT: u16 = 10;
+pub const MAX_SIDEBAR_PERCENT: u16 = 50;
+pub const SIDEBAR_WIDTH_STEP: u16 = 5;
+/// Below this many columns the sidebar stops being legible at all
+/// (body-part labels alone are ~10 chars) - a floor under the percentage,
+/// not a replacement for it, so a narrow terminal doesn't get an
+/// unreadable sliver.
+const MIN_SIDEBAR_COLUMNS: u16 = 18;
+
+/// Pure so it's directly unit-testable without a real terminal.
+fn sidebar_width(total_width: u16, percent: u16) -> u16 {
+    let percent = percent.clamp(MIN_SIDEBAR_PERCENT, MAX_SIDEBAR_PERCENT);
+    let raw = (total_width as u32 * percent as u32) / 100;
+    (raw as u16).max(MIN_SIDEBAR_COLUMNS.min(total_width))
+}
 
 /// How far the player can see, before line-of-sight is even considered.
 /// This is meant to rarely be the binding constraint - DDA characters can
@@ -40,7 +56,7 @@ pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
 /// The Settings list has dynamic items (current sidebar side, compass
 /// cardinal style), so its content is built in `draw_settings`; this is
 /// just the nav bound.
-pub const SETTINGS_ITEM_COUNT: usize = 5;
+pub const SETTINGS_ITEM_COUNT: usize = 7;
 
 pub enum Screen {
     Game,
@@ -236,7 +252,7 @@ fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32
     // would just as often be a lie as the truth.
     if visible.is_visible(x, y) {
         if let Some(npc) = world.npc_at(x, y) {
-            return ('@', Style::default().fg(attitude_color(npc.attitude)));
+            return (npc.glyph, Style::default().fg(ratatui_color(npc.color)));
         }
     }
     // A ground item sitting on a tile needs its own marker - otherwise it's
@@ -298,13 +314,14 @@ fn draw_game(
     visible: &VisibleSet,
 ) {
     let area = frame.area();
+    let sidebar_width = sidebar_width(area.width, display.sidebar_width_percent);
     // The constraint *order* determines physical left/right position, so
     // this has to flip which constraint comes first, not just relabel the
     // resulting rects afterward.
     let constraints = if display.sidebar_on_left {
-        [Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(20)]
+        [Constraint::Length(sidebar_width), Constraint::Min(20)]
     } else {
-        [Constraint::Min(20), Constraint::Length(SIDEBAR_WIDTH)]
+        [Constraint::Min(20), Constraint::Length(sidebar_width)]
     };
     let columns = Layout::default().direction(LayoutDirection::Horizontal).constraints(constraints).split(area);
     let (map_area, sidebar_area) = if display.sidebar_on_left {
@@ -342,7 +359,10 @@ fn draw_game(
 /// One HP line, e.g. "Head  |||::" by default, or "Head   45/60" with the
 /// (not yet reachable) Self-Aware trait - matches real DDA: an idea of your
 /// condition, not exact numbers, unless something specific reveals them.
-fn hp_line(bp: scourge_core::BodyPart, part: scourge_core::PartHealth, self_aware: bool) -> Line<'static> {
+/// One body part's spans plus their total rendered width - shared by the
+/// single-column layout (`hp_line`) and the 2-row grid layout (`hp_row`),
+/// which need the width to pad cells to a common size.
+fn hp_cell(bp: scourge_core::BodyPart, part: scourge_core::PartHealth, self_aware: bool) -> (Vec<Span<'static>>, usize) {
     let ratio = if part.max > 0 { part.current as f64 / part.max as f64 } else { 0.0 };
     let reading = if self_aware {
         format!("{:>3}/{:<3}", part.current, part.max)
@@ -350,11 +370,32 @@ fn hp_line(bp: scourge_core::BodyPart, part: scourge_core::PartHealth, self_awar
         hp_bar(part.current, part.max)
     };
     let style = Style::default().fg(hp_color(ratio));
-    Line::from(vec![
-        Span::raw(format!("{:<6}", bp.label())),
-        Span::styled(reading, style),
-        Span::raw(if part.is_broken() { " !" } else { "" }),
-    ])
+    let label = format!("{:<6}", bp.label());
+    let broken = if part.is_broken() { " !" } else { "" };
+    let used = label.len() + reading.len() + broken.len();
+    (vec![Span::raw(label), Span::styled(reading, style), Span::raw(broken.to_string())], used)
+}
+
+fn hp_line(bp: scourge_core::BodyPart, part: scourge_core::PartHealth, self_aware: bool) -> Line<'static> {
+    Line::from(hp_cell(bp, part, self_aware).0)
+}
+
+/// Real DDA's wider sidebar shows limbs in a row of 3 rather than one per
+/// line - `pad` matches the compass grid's own convention: every column
+/// but the last is padded to a fixed width so the next one lines up,
+/// the last is left to run its natural length since nothing follows it.
+const LIMB_CELL_WIDTH: usize = 13;
+
+fn hp_row(parts: &[(scourge_core::BodyPart, scourge_core::PartHealth)], self_aware: bool) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, (bp, part)) in parts.iter().enumerate() {
+        let (cell_spans, used) = hp_cell(*bp, *part, self_aware);
+        spans.extend(cell_spans);
+        if i + 1 < parts.len() {
+            spans.push(Span::raw(" ".repeat(LIMB_CELL_WIDTH.saturating_sub(used).max(1))));
+        }
+    }
+    Line::from(spans)
 }
 
 /// Green-to-red gradient by health ratio, richer when the terminal supports
@@ -387,12 +428,12 @@ fn attitude_color(attitude: Attitude) -> Color {
     }
 }
 
-/// Column width for one compass cell (`"North: Ally"` and the like) - a
-/// fixed target, not a hard limit, since a longer name just overflows past
-/// it and the sidebar's own word-wrap takes over from there. The 8
-/// directions always occupy their grid position, present or not, so the
-/// compass reads at a glance instead of making you check labels every time
-/// something is (or isn't) spotted.
+/// Column width for one compass cell (`"North: Z"`) - generous now that a
+/// cell only ever holds a single glyph, not a name (the name moved to
+/// `compass_roster`, below the grid). The 8 directions always occupy
+/// their grid position, present or not, so the compass reads at a glance
+/// instead of making you check labels every time something is (or isn't)
+/// spotted.
 const COMPASS_COL_WIDTH: usize = 9;
 
 /// The 8 diagonals are always abbreviated (NE/NW/SE/SW have no shorter
@@ -411,8 +452,11 @@ fn compass_label(dir: Direction, abbreviate_cardinals: bool) -> &'static str {
     }
 }
 
-/// The nearest visible NPC in a given compass direction, if any.
-fn npc_in_direction<'a>(world: &'a World, visible: &VisibleSet, dir: Direction) -> Option<(&'a str, Color)> {
+/// The nearest visible NPC in a given compass direction, if any - just its
+/// glyph and glyph color (its own visual identity, e.g. a zombie's gray
+/// 'Z' - not attitude). The full name, and how many share this direction
+/// or any other, is `compass_roster`'s job.
+fn npc_in_direction(world: &World, visible: &VisibleSet, dir: Direction) -> Option<(char, Color)> {
     world
         .npcs
         .iter()
@@ -426,45 +470,56 @@ fn npc_in_direction<'a>(world: &'a World, visible: &VisibleSet, dir: Direction) 
             }
         })
         .min_by_key(|(dist_sq, _)| *dist_sq)
-        .map(|(_, npc)| (npc.name.as_str(), attitude_color(npc.attitude)))
+        .map(|(_, npc)| (npc.glyph, ratatui_color(npc.color)))
+}
+
+/// Every distinct visible NPC (grouped by name+glyph, e.g. several zombies
+/// collapse into one "Z x3 Zombie" line rather than one line per
+/// occurrence) - the glyph keeps its own color (identity), the name is
+/// colored by attitude (a fast danger read: red hostile, green friendly).
+/// Sorted by name for a stable, non-jittery order across frames.
+fn compass_roster(world: &World, visible: &VisibleSet) -> Vec<Line<'static>> {
+    let mut groups: std::collections::HashMap<(&str, char), (TileColor, Attitude, u32)> = std::collections::HashMap::new();
+    for npc in &world.npcs {
+        if !visible.is_visible(npc.pos.x, npc.pos.y) {
+            continue;
+        }
+        let entry = groups.entry((npc.name.as_str(), npc.glyph)).or_insert((npc.color, npc.attitude, 0));
+        entry.2 += 1;
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by_key(|((name, _), _)| name.to_string());
+    groups
+        .into_iter()
+        .map(|((name, glyph), (color, attitude, count))| {
+            let count_part = if count > 1 { format!("x{count} ") } else { String::new() };
+            Line::from(vec![
+                Span::styled(glyph.to_string(), Style::default().fg(ratatui_color(color))),
+                Span::raw(format!(" {count_part}")),
+                Span::styled(name.to_string(), Style::default().fg(attitude_color(attitude))),
+            ])
+        })
+        .collect()
 }
 
 /// BN's sidebar compass: a fixed 3x3 grid (NW/N/NE over W/·/E over SW/S/SE,
-/// player implicitly at the center) naming the nearest visible NPC in each
-/// direction, colored by attitude. Always shows all 8 - an empty direction
-/// still shows its label, rather than the compass disappearing/reshuffling
+/// player implicitly at the center) showing the nearest visible NPC's
+/// glyph in each direction. Always shows all 8 - an empty direction still
+/// shows its label, rather than the compass disappearing/reshuffling
 /// depending on what's around, which would make it something you have to
-/// re-read every time instead of a fixed reference.
+/// re-read every time instead of a fixed reference. Below the grid,
+/// `compass_roster` names what's actually out there.
 fn compass_lines(world: &World, visible: &VisibleSet, abbreviate_cardinals: bool) -> Vec<Line<'static>> {
-    // `pad`: the first two columns of a row must hold a fixed width so the
-    // next column starts in the same place on every row (that's what makes
-    // it read as a grid); a long name there gets truncated to fit rather
-    // than pushing everything after it out of line. The third column has
-    // nothing after it, so it's left unpadded and untruncated - a long
-    // name there can run on without disturbing anything else.
-    let cell = |dir: Direction, pad: bool| -> Vec<Span<'static>> {
+    let cell = |dir: Direction| -> Vec<Span<'static>> {
         let label = compass_label(dir, abbreviate_cardinals);
-        let mut spans = vec![Span::raw(format!("{label}:"))];
-        let mut used = label.len() + 1;
-        if let Some((name, color)) = npc_in_direction(world, visible, dir) {
-            // Reserve room for the leading space *and* a guaranteed
-            // trailing gap, so a name that fills the whole budget still
-            // doesn't run straight into the next column with no separator.
-            let name = if pad {
-                let budget = COMPASS_COL_WIDTH.saturating_sub(used + 2);
-                name.chars().take(budget).collect::<String>()
-            } else {
-                name.to_string()
-            };
-            if !name.is_empty() {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(name.clone(), Style::default().fg(color)));
-                used += 1 + name.len();
-            }
+        let mut spans = vec![Span::raw(format!("{label}: "))];
+        let mut used = label.len() + 2;
+        match npc_in_direction(world, visible, dir) {
+            Some((glyph, color)) => spans.push(Span::styled(glyph.to_string(), Style::default().fg(color))),
+            None => spans.push(Span::raw(" ")),
         }
-        if pad {
-            spans.push(Span::raw(" ".repeat(COMPASS_COL_WIDTH.saturating_sub(used).max(1))));
-        }
+        used += 1;
+        spans.push(Span::raw(" ".repeat(COMPASS_COL_WIDTH.saturating_sub(used).max(1))));
         spans
     };
     let blank_cell = || vec![Span::raw(" ".repeat(COMPASS_COL_WIDTH))];
@@ -475,17 +530,29 @@ fn compass_lines(world: &World, visible: &VisibleSet, abbreviate_cardinals: bool
         Line::from(spans)
     };
 
-    vec![
-        row(cell(Direction::NorthWest, true), cell(Direction::North, true), cell(Direction::NorthEast, false)),
-        row(cell(Direction::West, true), blank_cell(), cell(Direction::East, false)),
-        row(cell(Direction::SouthWest, true), cell(Direction::South, true), cell(Direction::SouthEast, false)),
-    ]
+    let mut lines = vec![
+        row(cell(Direction::NorthWest), cell(Direction::North), cell(Direction::NorthEast)),
+        row(cell(Direction::West), blank_cell(), cell(Direction::East)),
+        row(cell(Direction::SouthWest), cell(Direction::South), cell(Direction::SouthEast)),
+    ];
+    lines.extend(compass_roster(world, visible));
+    lines
 }
 
-fn section_lines(section: SidebarSection, world: &World) -> Vec<Line<'static>> {
+fn section_lines(section: SidebarSection, world: &World, inner_width: u16, limbs_two_rows: bool) -> Vec<Line<'static>> {
     match section {
         SidebarSection::Health => {
-            world.player.health.parts().into_iter().map(|(bp, part)| hp_line(bp, part, world.player.self_aware)).collect()
+            let parts = world.player.health.parts();
+            // 2 padded columns + 1 unpadded needs roughly 2 cell-widths
+            // plus a bit for the third - auto-collapses to one column
+            // below that, same "narrower sidebar -> falls back" rule the
+            // compass grid follows.
+            let two_row_fits = inner_width as usize >= LIMB_CELL_WIDTH * 2 + 8;
+            if limbs_two_rows && two_row_fits {
+                vec![hp_row(&parts[0..3], world.player.self_aware), hp_row(&parts[3..6], world.player.self_aware)]
+            } else {
+                parts.into_iter().map(|(bp, part)| hp_line(bp, part, world.player.self_aware)).collect()
+            }
         }
         SidebarSection::Hunger => vec![Line::raw(format!("Hunger {}/100", world.player.hunger))],
         SidebarSection::Stats => {
@@ -510,11 +577,13 @@ fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, vis
     }
     lines.push(Line::raw(""));
 
+    // The block's border eats one column of the area's own width.
+    let inner_width = area.width.saturating_sub(1);
     for section in &display.sidebar_order {
         if *section == SidebarSection::Compass {
             lines.extend(compass_lines(world, visible, display.compass_abbreviate_cardinals));
         } else {
-            lines.extend(section_lines(*section, world));
+            lines.extend(section_lines(*section, world, inner_width, display.limbs_two_rows));
         }
         lines.push(Line::raw(""));
     }
@@ -822,12 +891,15 @@ fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {
 fn draw_settings(frame: &mut Frame, display: &DisplaySettings, selected: usize) {
     let side = if display.sidebar_on_left { "Left" } else { "Right" };
     let cardinals = if display.compass_abbreviate_cardinals { "Abbreviated (N/S/E/W)" } else { "Full words" };
+    let limbs = if display.limbs_two_rows { "2 rows of 3 (space permitting)" } else { "Single column" };
     let items = [
         "Movement: Vi-keys (hjkl + yubn)".to_string(),
         "Movement: WASD (wasd + qezc)".to_string(),
         "Custom keybinds...".to_string(),
         format!("Sidebar: {side} (Enter to switch)"),
         format!("Compass cardinals: {cardinals} (Enter to toggle)"),
+        format!("Sidebar width: {}% (Left/Right to adjust)", display.sidebar_width_percent.clamp(MIN_SIDEBAR_PERCENT, MAX_SIDEBAR_PERCENT)),
+        format!("Limb layout: {limbs} (Enter to toggle)"),
     ];
     let popup = centered_rect(50, 40, frame.area());
     let list_items: Vec<ListItem> = items
@@ -1022,6 +1094,40 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_width_scales_with_terminal_width_and_clamps_to_the_percent_range() {
+        assert_eq!(sidebar_width(100, 25), 25, "25% of a 100-wide terminal");
+        assert_eq!(sidebar_width(200, 25), 50, "scales up in a wider terminal, unlike a fixed column count");
+        assert_eq!(sidebar_width(100, 5), MIN_SIDEBAR_COLUMNS.min(100), "below MIN_SIDEBAR_PERCENT, clamped up");
+        assert_eq!(sidebar_width(100, 90), 50, "above MAX_SIDEBAR_PERCENT, clamped down to 50%");
+    }
+
+    #[test]
+    fn sidebar_width_never_drops_below_the_legibility_floor_even_at_a_tiny_percent() {
+        assert!(sidebar_width(40, 10) >= MIN_SIDEBAR_COLUMNS.min(40));
+    }
+
+    #[test]
+    fn health_section_collapses_to_a_single_column_when_the_sidebar_is_too_narrow() {
+        let world = World::new(scourge_core::Map::new(10, 10, Tile::Floor));
+        let lines = section_lines(SidebarSection::Health, &world, 20, true);
+        assert_eq!(lines.len(), 6, "narrow sidebar: one line per body part, same as limbs_two_rows off");
+    }
+
+    #[test]
+    fn health_section_uses_two_rows_when_wide_enough_and_enabled() {
+        let world = World::new(scourge_core::Map::new(10, 10, Tile::Floor));
+        let lines = section_lines(SidebarSection::Health, &world, 60, true);
+        assert_eq!(lines.len(), 2, "wide sidebar with the setting on: 2 rows of 3");
+    }
+
+    #[test]
+    fn health_section_stays_single_column_when_the_setting_is_off_even_if_wide() {
+        let world = World::new(scourge_core::Map::new(10, 10, Tile::Floor));
+        let lines = section_lines(SidebarSection::Health, &world, 60, false);
+        assert_eq!(lines.len(), 6, "setting off overrides available width");
+    }
+
+    #[test]
     fn compass_label_defaults_to_full_cardinal_words_but_always_abbreviates_diagonals() {
         assert_eq!(compass_label(Direction::North, false), "North");
         assert_eq!(compass_label(Direction::North, true), "N");
@@ -1047,45 +1153,73 @@ mod tests {
     }
 
     #[test]
-    fn compass_lines_picks_the_nearest_npc_sharing_a_direction() {
+    fn compass_lines_picks_the_nearest_npcs_glyph_sharing_a_direction() {
         let mut world = World::new(scourge_core::Map::new(20, 20, Tile::Floor));
         world.player.pos = scourge_core::Pos { x: 10, y: 10 };
-        world.npcs.push(scourge_core::Npc::new(
-            "Far",
-            scourge_core::Pos { x: 10, y: 5 },
-            scourge_core::Attitude::Friendly,
-        ));
-        world.npcs.push(scourge_core::Npc::new(
-            "Near",
-            scourge_core::Pos { x: 10, y: 8 },
-            scourge_core::Attitude::Friendly,
-        ));
+        world.npcs.push(
+            scourge_core::Npc::new("Far", scourge_core::Pos { x: 10, y: 5 }, scourge_core::Attitude::Hostile)
+                .with_glyph('F', TileColor::Red),
+        );
+        world.npcs.push(
+            scourge_core::Npc::new("Near", scourge_core::Pos { x: 10, y: 8 }, scourge_core::Attitude::Friendly)
+                .with_glyph('N', TileColor::Green),
+        );
         let visible = world.map.visible_from(world.player.pos, 20);
-        // Abbreviated cardinals leave enough room to see the full,
-        // untruncated name - truncation itself is covered separately below.
         let lines = compass_lines(&world, &visible, true);
         let north_row = line_text(&lines[0]);
-        assert!(north_row.contains("Near"), "closer NPC should win: {north_row}");
-        assert!(!north_row.contains("Far"));
+        assert!(north_row.contains('N'), "closer NPC's glyph should win: {north_row}");
+        assert!(!north_row.contains('F'), "farther NPC's glyph should not appear: {north_row}");
     }
 
     #[test]
-    fn compass_lines_never_run_columns_together_even_when_a_name_is_truncated() {
+    fn compass_roster_groups_same_named_npcs_with_a_count() {
         let mut world = World::new(scourge_core::Map::new(20, 20, Tile::Floor));
         world.player.pos = scourge_core::Pos { x: 10, y: 10 };
-        // Full-word cardinal labels leave very little room for a name -
-        // this should truncate gracefully, never collide with "NE:".
-        world.npcs.push(scourge_core::Npc::new(
-            "Alexandria",
-            scourge_core::Pos { x: 10, y: 5 },
-            scourge_core::Attitude::Friendly,
-        ));
+        for pos in [(5, 10), (10, 5), (10, 15)] {
+            world.npcs.push(
+                scourge_core::Npc::new(
+                    "Zombie",
+                    scourge_core::Pos { x: pos.0, y: pos.1 },
+                    scourge_core::Attitude::Hostile,
+                )
+                .with_glyph('Z', TileColor::Gray),
+            );
+        }
         let visible = world.map.visible_from(world.player.pos, 20);
-        let lines = compass_lines(&world, &visible, false);
-        let north_row = line_text(&lines[0]);
-        assert!(north_row.contains("North:"));
-        assert!(north_row.contains("NE:"), "third column must still be intact: {north_row}");
-        let before_ne = north_row.split("NE:").next().unwrap();
-        assert!(before_ne.ends_with(' '), "must not run straight into the next column with no separator: {north_row:?}");
+        let roster = compass_roster(&world, &visible);
+        assert_eq!(roster.len(), 1, "all three zombies collapse into one grouped line");
+        let text = line_text(&roster[0]);
+        assert!(text.contains("Z x3 Zombie"), "expected a glyph + count + name grouping, got: {text:?}");
+    }
+
+    #[test]
+    fn compass_roster_does_not_show_a_count_for_a_single_npc() {
+        let mut world = World::new(scourge_core::Map::new(20, 20, Tile::Floor));
+        world.player.pos = scourge_core::Pos { x: 10, y: 10 };
+        world.npcs.push(
+            scourge_core::Npc::new("Ally", scourge_core::Pos { x: 11, y: 10 }, scourge_core::Attitude::Friendly)
+                .with_glyph('@', TileColor::Green),
+        );
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let roster = compass_roster(&world, &visible);
+        assert_eq!(roster.len(), 1);
+        let text = line_text(&roster[0]);
+        assert!(!text.contains('x'), "a lone NPC shouldn't get an 'x1' count: {text:?}");
+        assert!(text.contains("Ally"));
+    }
+
+    #[test]
+    fn compass_roster_ignores_npcs_outside_line_of_sight() {
+        let mut map = scourge_core::Map::new(20, 3, Tile::Floor);
+        for x in 0..20 {
+            map.set(x, 0, Tile::Wall);
+            map.set(x, 2, Tile::Wall);
+        }
+        map.set(10, 1, Tile::Wall); // blocks sight down the corridor
+        let mut world = World::new(map);
+        world.player.pos = scourge_core::Pos { x: 1, y: 1 };
+        world.npcs.push(scourge_core::Npc::new("Zombie", scourge_core::Pos { x: 18, y: 1 }, scourge_core::Attitude::Hostile));
+        let visible = world.map.visible_from(world.player.pos, 20);
+        assert!(compass_roster(&world, &visible).is_empty(), "blocked by a wall, shouldn't be in the roster");
     }
 }

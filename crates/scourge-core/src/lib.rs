@@ -833,17 +833,39 @@ pub struct Npc {
     pub health: Health,
     pub inventory: Vec<Item>,
     pub attitude: Attitude,
+    /// A human-like NPC (ally, and eventually neutral/hostile people) is
+    /// always '@', same as the player - only its color differs, by
+    /// attitude. A creature (a zombie, and eventually other species) gets
+    /// its own glyph and a color tied to *what it is*, not just whether
+    /// it's hostile - real DDA colors different zombie kinds differently
+    /// even though they're all hostile. Set via `with_glyph`.
+    pub glyph: char,
+    pub color: TileColor,
 }
 
 impl Npc {
     pub fn new(name: impl Into<String>, pos: Pos, attitude: Attitude) -> Self {
+        let color = match attitude {
+            Attitude::Friendly => TileColor::Green,
+            Attitude::Hostile => TileColor::Red,
+        };
         Npc {
             name: name.into(),
             pos,
             health: Health::from_strength(8),
             inventory: Vec::new(),
             attitude,
+            glyph: '@',
+            color,
         }
+    }
+
+    /// Overrides the default '@' + attitude-color look for a creature type
+    /// with its own visual identity.
+    pub fn with_glyph(mut self, glyph: char, color: TileColor) -> Self {
+        self.glyph = glyph;
+        self.color = color;
+        self
     }
 }
 
