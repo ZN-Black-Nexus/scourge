@@ -335,6 +335,10 @@ fn handle_key(
                     display.sidebar_on_left = !display.sidebar_on_left;
                     let _ = display.save(settings_path);
                 }
+                4 => {
+                    display.compass_abbreviate_cardinals = !display.compass_abbreviate_cardinals;
+                    let _ = display.save(settings_path);
+                }
                 _ => {}
             },
             _ => {}

@@ -44,6 +44,13 @@ impl SidebarSection {
 pub struct DisplaySettings {
     pub sidebar_on_left: bool,
     pub sidebar_order: Vec<SidebarSection>,
+    /// Compass diagonals (NE/NW/SE/SW) are always abbreviated - there's no
+    /// shorter form worth having. This only affects the 4 cardinals
+    /// (North/South/East/West), and defaults to the full word.
+    /// `serde(default)` so a settings.json saved before this field existed
+    /// still loads instead of falling back to every other default too.
+    #[serde(default)]
+    pub compass_abbreviate_cardinals: bool,
 }
 
 impl Default for DisplaySettings {
@@ -51,6 +58,7 @@ impl Default for DisplaySettings {
         DisplaySettings {
             sidebar_on_left: false,
             sidebar_order: SidebarSection::ALL.to_vec(),
+            compass_abbreviate_cardinals: false,
         }
     }
 }

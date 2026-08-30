@@ -37,9 +37,10 @@ pub(crate) const SIGHT_RADIUS: i32 = 60;
 const NEAR_RADIUS: i32 = 20;
 
 pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
-/// The Settings list has a dynamic 4th item (current sidebar side), so its
-/// content is built in `draw_settings`; this is just the nav bound.
-pub const SETTINGS_ITEM_COUNT: usize = 4;
+/// The Settings list has dynamic items (current sidebar side, compass
+/// cardinal style), so its content is built in `draw_settings`; this is
+/// just the nav bound.
+pub const SETTINGS_ITEM_COUNT: usize = 5;
 
 pub enum Screen {
     Game,
@@ -386,49 +387,99 @@ fn attitude_color(attitude: Attitude) -> Color {
     }
 }
 
-/// BN's sidebar compass: for each of the 8 directions, name the nearest
-/// visible NPC that way, colored by attitude. Directions with nothing
-/// visible are skipped entirely rather than padded out to all 8, since an
-/// empty compass is the common case and 8 mostly-blank lines would just be
-/// wasted sidebar space.
-fn compass_lines(world: &World, visible: &VisibleSet) -> Vec<Line<'static>> {
-    let mut by_direction: Vec<(Direction, &str, Color)> = Vec::new();
-    for npc in &world.npcs {
-        if !visible.is_visible(npc.pos.x, npc.pos.y) {
-            continue;
-        }
-        let (dx, dy) = (npc.pos.x - world.player.pos.x, npc.pos.y - world.player.pos.y);
-        if dx == 0 && dy == 0 {
-            continue;
-        }
-        let dir = compass_direction(dx, dy);
-        by_direction.push((dir, npc.name.as_str(), attitude_color(npc.attitude)));
-    }
-    if by_direction.is_empty() {
-        return vec![Line::raw("(nothing spotted)")];
-    }
-    by_direction
-        .into_iter()
-        .map(|(dir, name, color)| {
-            Line::from(vec![
-                Span::raw(format!("{:<3}", compass_abbrev(dir))),
-                Span::styled(name.to_string(), Style::default().fg(color)),
-            ])
-        })
-        .collect()
-}
+/// Column width for one compass cell (`"North: Ally"` and the like) - a
+/// fixed target, not a hard limit, since a longer name just overflows past
+/// it and the sidebar's own word-wrap takes over from there. The 8
+/// directions always occupy their grid position, present or not, so the
+/// compass reads at a glance instead of making you check labels every time
+/// something is (or isn't) spotted.
+const COMPASS_COL_WIDTH: usize = 9;
 
-fn compass_abbrev(dir: Direction) -> &'static str {
+/// The 8 diagonals are always abbreviated (NE/NW/SE/SW have no shorter
+/// form worth having); the 4 cardinals default to full words but can be
+/// abbreviated too via a sidebar setting.
+fn compass_label(dir: Direction, abbreviate_cardinals: bool) -> &'static str {
     match dir {
-        Direction::North => "N",
-        Direction::South => "S",
-        Direction::East => "E",
-        Direction::West => "W",
+        Direction::North => if abbreviate_cardinals { "N" } else { "North" },
+        Direction::South => if abbreviate_cardinals { "S" } else { "South" },
+        Direction::East => if abbreviate_cardinals { "E" } else { "East" },
+        Direction::West => if abbreviate_cardinals { "W" } else { "West" },
         Direction::NorthEast => "NE",
         Direction::NorthWest => "NW",
         Direction::SouthEast => "SE",
         Direction::SouthWest => "SW",
     }
+}
+
+/// The nearest visible NPC in a given compass direction, if any.
+fn npc_in_direction<'a>(world: &'a World, visible: &VisibleSet, dir: Direction) -> Option<(&'a str, Color)> {
+    world
+        .npcs
+        .iter()
+        .filter(|npc| visible.is_visible(npc.pos.x, npc.pos.y))
+        .filter_map(|npc| {
+            let (dx, dy) = (npc.pos.x - world.player.pos.x, npc.pos.y - world.player.pos.y);
+            if (dx != 0 || dy != 0) && compass_direction(dx, dy) == dir {
+                Some((dx * dx + dy * dy, npc))
+            } else {
+                None
+            }
+        })
+        .min_by_key(|(dist_sq, _)| *dist_sq)
+        .map(|(_, npc)| (npc.name.as_str(), attitude_color(npc.attitude)))
+}
+
+/// BN's sidebar compass: a fixed 3x3 grid (NW/N/NE over W/·/E over SW/S/SE,
+/// player implicitly at the center) naming the nearest visible NPC in each
+/// direction, colored by attitude. Always shows all 8 - an empty direction
+/// still shows its label, rather than the compass disappearing/reshuffling
+/// depending on what's around, which would make it something you have to
+/// re-read every time instead of a fixed reference.
+fn compass_lines(world: &World, visible: &VisibleSet, abbreviate_cardinals: bool) -> Vec<Line<'static>> {
+    // `pad`: the first two columns of a row must hold a fixed width so the
+    // next column starts in the same place on every row (that's what makes
+    // it read as a grid); a long name there gets truncated to fit rather
+    // than pushing everything after it out of line. The third column has
+    // nothing after it, so it's left unpadded and untruncated - a long
+    // name there can run on without disturbing anything else.
+    let cell = |dir: Direction, pad: bool| -> Vec<Span<'static>> {
+        let label = compass_label(dir, abbreviate_cardinals);
+        let mut spans = vec![Span::raw(format!("{label}:"))];
+        let mut used = label.len() + 1;
+        if let Some((name, color)) = npc_in_direction(world, visible, dir) {
+            // Reserve room for the leading space *and* a guaranteed
+            // trailing gap, so a name that fills the whole budget still
+            // doesn't run straight into the next column with no separator.
+            let name = if pad {
+                let budget = COMPASS_COL_WIDTH.saturating_sub(used + 2);
+                name.chars().take(budget).collect::<String>()
+            } else {
+                name.to_string()
+            };
+            if !name.is_empty() {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(name.clone(), Style::default().fg(color)));
+                used += 1 + name.len();
+            }
+        }
+        if pad {
+            spans.push(Span::raw(" ".repeat(COMPASS_COL_WIDTH.saturating_sub(used).max(1))));
+        }
+        spans
+    };
+    let blank_cell = || vec![Span::raw(" ".repeat(COMPASS_COL_WIDTH))];
+    let row = |a: Vec<Span<'static>>, b: Vec<Span<'static>>, c: Vec<Span<'static>>| {
+        let mut spans = a;
+        spans.extend(b);
+        spans.extend(c);
+        Line::from(spans)
+    };
+
+    vec![
+        row(cell(Direction::NorthWest, true), cell(Direction::North, true), cell(Direction::NorthEast, false)),
+        row(cell(Direction::West, true), blank_cell(), cell(Direction::East, false)),
+        row(cell(Direction::SouthWest, true), cell(Direction::South, true), cell(Direction::SouthEast, false)),
+    ]
 }
 
 fn section_lines(section: SidebarSection, world: &World) -> Vec<Line<'static>> {
@@ -461,7 +512,7 @@ fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, vis
 
     for section in &display.sidebar_order {
         if *section == SidebarSection::Compass {
-            lines.extend(compass_lines(world, visible));
+            lines.extend(compass_lines(world, visible, display.compass_abbreviate_cardinals));
         } else {
             lines.extend(section_lines(*section, world));
         }
@@ -754,15 +805,18 @@ fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {
     frame.render_widget(list, popup);
 }
 
-/// Same list-with-selection look as `draw_menu`, but one item's label is
-/// dynamic (current sidebar side), so it can't be a plain `&[&str]`.
+/// Same list-with-selection look as `draw_menu`, but some items' labels
+/// are dynamic (current sidebar side, compass cardinal style), so it can't
+/// be a plain `&[&str]`.
 fn draw_settings(frame: &mut Frame, display: &DisplaySettings, selected: usize) {
     let side = if display.sidebar_on_left { "Left" } else { "Right" };
+    let cardinals = if display.compass_abbreviate_cardinals { "Abbreviated (N/S/E/W)" } else { "Full words" };
     let items = [
         "Movement: Vi-keys (hjkl + yubn)".to_string(),
         "Movement: WASD (wasd + qezc)".to_string(),
         "Custom keybinds...".to_string(),
         format!("Sidebar: {side} (Enter to switch)"),
+        format!("Compass cardinals: {cardinals} (Enter to toggle)"),
     ];
     let popup = centered_rect(50, 40, frame.area());
     let list_items: Vec<ListItem> = items
@@ -944,5 +998,73 @@ mod tests {
         assert_eq!(classify_color_support(None, Some("xterm-256color")), ColorSupport::Ansi256);
         assert_eq!(classify_color_support(None, Some("linux")), ColorSupport::Basic, "bare tty console");
         assert_eq!(classify_color_support(None, None), ColorSupport::Basic);
+    }
+
+    #[test]
+    fn compass_label_defaults_to_full_cardinal_words_but_always_abbreviates_diagonals() {
+        assert_eq!(compass_label(Direction::North, false), "North");
+        assert_eq!(compass_label(Direction::North, true), "N");
+        assert_eq!(compass_label(Direction::NorthEast, false), "NE");
+        assert_eq!(compass_label(Direction::NorthEast, true), "NE");
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn compass_lines_always_shows_all_eight_directions_even_when_empty() {
+        let world = World::new(scourge_core::Map::new(20, 20, Tile::Floor));
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let lines = compass_lines(&world, &visible, false);
+        assert_eq!(lines.len(), 3, "always 3 rows, present or not");
+        assert!(line_text(&lines[0]).contains("NW:"));
+        assert!(line_text(&lines[0]).contains("North:"));
+        assert!(line_text(&lines[0]).contains("NE:"));
+        assert!(line_text(&lines[1]).contains("West:") || line_text(&lines[1]).contains("W:"));
+        assert!(line_text(&lines[2]).contains("South:"));
+    }
+
+    #[test]
+    fn compass_lines_picks_the_nearest_npc_sharing_a_direction() {
+        let mut world = World::new(scourge_core::Map::new(20, 20, Tile::Floor));
+        world.player.pos = scourge_core::Pos { x: 10, y: 10 };
+        world.npcs.push(scourge_core::Npc::new(
+            "Far",
+            scourge_core::Pos { x: 10, y: 5 },
+            scourge_core::Attitude::Friendly,
+        ));
+        world.npcs.push(scourge_core::Npc::new(
+            "Near",
+            scourge_core::Pos { x: 10, y: 8 },
+            scourge_core::Attitude::Friendly,
+        ));
+        let visible = world.map.visible_from(world.player.pos, 20);
+        // Abbreviated cardinals leave enough room to see the full,
+        // untruncated name - truncation itself is covered separately below.
+        let lines = compass_lines(&world, &visible, true);
+        let north_row = line_text(&lines[0]);
+        assert!(north_row.contains("Near"), "closer NPC should win: {north_row}");
+        assert!(!north_row.contains("Far"));
+    }
+
+    #[test]
+    fn compass_lines_never_run_columns_together_even_when_a_name_is_truncated() {
+        let mut world = World::new(scourge_core::Map::new(20, 20, Tile::Floor));
+        world.player.pos = scourge_core::Pos { x: 10, y: 10 };
+        // Full-word cardinal labels leave very little room for a name -
+        // this should truncate gracefully, never collide with "NE:".
+        world.npcs.push(scourge_core::Npc::new(
+            "Alexandria",
+            scourge_core::Pos { x: 10, y: 5 },
+            scourge_core::Attitude::Friendly,
+        ));
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let lines = compass_lines(&world, &visible, false);
+        let north_row = line_text(&lines[0]);
+        assert!(north_row.contains("North:"));
+        assert!(north_row.contains("NE:"), "third column must still be intact: {north_row}");
+        let before_ne = north_row.split("NE:").next().unwrap();
+        assert!(before_ne.ends_with(' '), "must not run straight into the next column with no separator: {north_row:?}");
     }
 }
