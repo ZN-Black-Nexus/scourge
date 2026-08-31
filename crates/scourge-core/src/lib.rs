@@ -124,10 +124,11 @@ pub enum Action {
     Talk(usize),
     /// Melee-attacks the NPC at this index - reached by walking into a
     /// hostile one, real DDA's own bump-to-attack convention, not a
-    /// separate menu. Deliberately just a flat guaranteed hit for now: no
-    /// accuracy/dodge/weapon-damage system yet, matching "simple content
-    /// first" - those are real DDA-depth additions for later, once combat
-    /// existing at all is confirmed to work.
+    /// separate menu. Deliberately just a flat guaranteed hit for now (a
+    /// wielded weapon's own damage, or bare fists otherwise - see
+    /// `World::player_attack_damage`): no accuracy/dodge system yet,
+    /// matching "simple content first" - that's a real DDA-depth addition
+    /// for later, once combat existing at all is confirmed to work.
     Attack(usize),
 }
 
@@ -170,7 +171,9 @@ pub enum Tile {
     /// independent - closing curtains doesn't stop you walking through an
     /// open window, and an open window doesn't imply the curtain's aside.
     Window { open: bool, curtain_open: bool },
-    /// Blocks both movement and sight, like real dense underbrush.
+    /// Blocks both movement and sight, like real dense underbrush. 'b',
+    /// a shade of green - the berries themselves are the blue '*' item
+    /// they drop, not the bush's own look.
     BlueberryBush,
     /// Non-tree woody vegetation - denser than TallGrass, same "blocks
     /// movement and sight" class as the bushes. DDA/BN's 's'.
@@ -221,7 +224,7 @@ impl Tile {
             // colors (see `color()`).
             Tile::Window { open: true, .. } => '\'',
             Tile::Window { open: false, .. } => '"',
-            Tile::BlueberryBush => '*',
+            Tile::BlueberryBush => 'b',
             Tile::Shrub => 's',
             Tile::YoungTree => 't',
             Tile::Tree => 'T',
@@ -237,7 +240,7 @@ impl Tile {
             Tile::Wall => TileColor::Gray,
             Tile::DoorClosed | Tile::DoorOpen => TileColor::Brown,
             Tile::Window { .. } => TileColor::Cyan,
-            Tile::BlueberryBush => TileColor::Blue,
+            Tile::BlueberryBush => TileColor::DarkGreen,
             Tile::Shrub => TileColor::DarkGreen,
             Tile::YoungTree => TileColor::Green,
             Tile::Tree => TileColor::DarkGreen,
@@ -492,20 +495,36 @@ pub struct Item {
     pub kind: ItemKind,
     pub glyph: char,
     pub color: TileColor,
+    /// `None` means "not a weapon" - wielding it is no better than bare
+    /// fists in combat. `Some(n)` replaces (not adds to) the unarmed
+    /// baseline while wielded, matching real DDA: a weapon has its own
+    /// damage, it doesn't stack on top of your fists.
+    pub melee_damage: Option<i32>,
 }
 
 impl Item {
     pub fn new(name: impl Into<String>) -> Self {
-        Item { name: name.into(), kind: ItemKind::Generic, glyph: '?', color: TileColor::Magenta }
+        Item { name: name.into(), kind: ItemKind::Generic, glyph: '?', color: TileColor::Magenta, melee_damage: None }
     }
 
     pub fn food(name: impl Into<String>, hunger_restored: i32) -> Self {
-        Item { name: name.into(), kind: ItemKind::Food { hunger_restored }, glyph: '?', color: TileColor::Magenta }
+        Item {
+            name: name.into(),
+            kind: ItemKind::Food { hunger_restored },
+            glyph: '?',
+            color: TileColor::Magenta,
+            melee_damage: None,
+        }
     }
 
     pub fn with_glyph(mut self, glyph: char, color: TileColor) -> Self {
         self.glyph = glyph;
         self.color = color;
+        self
+    }
+
+    pub fn with_melee_damage(mut self, damage: i32) -> Self {
+        self.melee_damage = Some(damage);
         self
     }
 
@@ -920,10 +939,12 @@ const NPC_PATHFIND_BUDGET: usize = 2000;
 /// line-of-sight/stealth check yet, just distance, matching "simple first".
 const HOSTILE_DETECTION_RADIUS: i32 = 15;
 
-/// Flat, guaranteed damage per hit in both directions - no accuracy/dodge/
-/// weapon-damage system yet. Always lands on the torso for the same
+/// Bare-fists damage - a wielded weapon with its own `melee_damage`
+/// replaces this (see `World::player_attack_damage`), otherwise this is
+/// what every attack does. Still flat/guaranteed either way - no
+/// accuracy/dodge system yet. Always lands on the torso for the same
 /// reason: simplest thing that makes combat exist at all.
-const PLAYER_ATTACK_DAMAGE: i32 = 10;
+const UNARMED_ATTACK_DAMAGE: i32 = 10;
 const HOSTILE_ATTACK_DAMAGE: i32 = 5;
 
 pub struct World {
@@ -1331,18 +1352,30 @@ impl World {
         }
     }
 
+    /// A wielded weapon's own damage, or bare-fists damage if unwielded
+    /// (or wielding something with no `melee_damage` set, e.g. food) -
+    /// still no accuracy/dodge system, but wielding something now actually
+    /// changes the outcome instead of every hit being identical either way.
+    fn player_attack_damage(&self) -> i32 {
+        self.player.wielded.as_ref().and_then(|item| item.melee_damage).unwrap_or(UNARMED_ATTACK_DAMAGE)
+    }
+
     /// The player attacking an NPC - reached either by bumping into a
     /// hostile one or via `Action::Attack` from the examine menu. Flat
-    /// guaranteed damage to the torso, no accuracy/dodge/weapon-damage
-    /// system yet (see `Action::Attack`'s doc comment).
+    /// guaranteed damage to the torso, no accuracy/dodge system yet (see
+    /// `Action::Attack`'s doc comment). A kill leaves a corpse item behind
+    /// instead of the NPC just vanishing - same glyph slot as the ground
+    /// items rendering already handles, colored the same as the NPC was.
     fn attack_npc(&mut self, index: usize) {
         let name = self.npcs[index].name.clone();
-        let lethal = self.npcs[index].health.damage(BodyPart::Torso, PLAYER_ATTACK_DAMAGE);
+        let damage = self.player_attack_damage();
+        let lethal = self.npcs[index].health.damage(BodyPart::Torso, damage);
         if lethal {
+            let npc = self.npcs.remove(index);
+            self.place_item(npc.pos.x, npc.pos.y, Item::new(format!("{name} corpse")).with_glyph('%', npc.color));
             self.last_message = Some(format!("You defeated the {name}."));
-            self.npcs.remove(index);
         } else {
-            self.last_message = Some(format!("You hit the {name} for {PLAYER_ATTACK_DAMAGE} damage."));
+            self.last_message = Some(format!("You hit the {name} for {damage} damage."));
         }
         self.tick();
     }
@@ -1910,6 +1943,35 @@ mod tests {
         world.step(Action::Move(Direction::East));
         assert!(world.npcs.is_empty(), "defeated NPCs are removed from the world");
         assert_eq!(world.last_message.as_deref(), Some("You defeated the Zombie."));
+
+        let corpse = &world.items_at(3, 2)[0];
+        assert_eq!(corpse.name, "Zombie corpse");
+        assert_eq!(corpse.glyph, '%');
+        assert_eq!(corpse.color, TileColor::Red, "corpse matches the zombie's own color, not a fixed one");
+    }
+
+    #[test]
+    fn wielding_a_weapon_replaces_bare_fists_damage() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        world.player.wielded = Some(Item::new("Sharp Stick").with_melee_damage(25));
+        world.npcs.push(Npc::new("Zombie", Pos { x: 3, y: 2 }, Attitude::Hostile));
+
+        world.step(Action::Move(Direction::East));
+        assert_eq!(world.npcs[0].health.part(BodyPart::Torso).current, 35, "60 max - 25 weapon damage, not the 10 unarmed baseline");
+    }
+
+    #[test]
+    fn wielding_something_with_no_melee_damage_falls_back_to_bare_fists() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        world.player.wielded = Some(item("Rock")); // the plain test helper - no melee_damage set
+        world.npcs.push(Npc::new("Zombie", Pos { x: 3, y: 2 }, Attitude::Hostile));
+
+        world.step(Action::Move(Direction::East));
+        assert_eq!(world.npcs[0].health.part(BodyPart::Torso).current, 50, "60 max - 10 unarmed damage, same as wielding nothing");
     }
 
     #[test]

@@ -203,7 +203,7 @@ fn handle_key(
                 let (vw, vh) = viewport_size();
                 let cam_x = (world.player.pos.x - vw / 2).clamp(0, (world.map.width - vw).max(0));
                 let cam_y = (world.player.pos.y - vh / 2).clamp(0, (world.map.height - vh).max(0));
-                *screen = Screen::Map { cam_x, cam_y };
+                *screen = Screen::Map { cam_x, cam_y, zoom: 0 };
             } else if code == KeyCode::Char('x') {
                 *screen = Screen::Look {
                     cursor_x: world.player.pos.x,
@@ -347,14 +347,21 @@ fn handle_key(
                 *cursor_y = (*cursor_y + dy).clamp(0, world.map.height - 1);
             }
         }
-        Screen::Map { cam_x, cam_y } => {
+        Screen::Map { cam_x, cam_y, zoom } => {
             if code == KeyCode::Esc {
                 *screen = Screen::Game;
+            } else if code == KeyCode::Char('z') {
+                *zoom = (*zoom + 1) % ui::MAP_ZOOM_FACTORS.len();
             } else if let Some(Action::Move(dir)) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 let (dx, dy) = direction_delta(dir);
                 let (vw, vh) = viewport_size();
-                *cam_x = (*cam_x + dx).clamp(0, (world.map.width - vw).max(0));
-                *cam_y = (*cam_y + dy).clamp(0, (world.map.height - vh).max(0));
+                // Panning steps by a whole block at a time when zoomed
+                // out, so a single move feels the same "amount of map" at
+                // either zoom level instead of crawling across a now much
+                // wider view one tile per press.
+                let factor = ui::MAP_ZOOM_FACTORS[*zoom];
+                *cam_x = (*cam_x + dx * factor).clamp(0, (world.map.width - vw * factor).max(0));
+                *cam_y = (*cam_y + dy * factor).clamp(0, (world.map.height - vh * factor).max(0));
             }
         }
         // Arrow/jk + Enter still works throughout (unchanged), but each
@@ -1001,5 +1008,55 @@ mod tests {
         let mut screen = Screen::Settings { selected: 0 };
         handle_key(KeyCode::Char('s'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::SidebarSettings { selected: 0 }));
+    }
+
+    #[test]
+    fn map_screen_opens_at_zoom_zero_and_z_toggles_between_the_two_levels() {
+        let mut world = test_world();
+        let mut screen = Screen::Game;
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-s2");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-s2");
+        let save_path = tmp_path("save-s2");
+
+        handle_key(KeyCode::Char('m'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::Map { zoom: 0, .. }), "opens zoomed in by default");
+
+        handle_key(KeyCode::Char('z'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::Map { zoom: 1, .. }));
+
+        handle_key(KeyCode::Char('z'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::Map { zoom: 0, .. }), "toggles back with only two levels");
+    }
+
+    #[test]
+    fn map_screen_panning_speed_scales_with_zoom_factor() {
+        // Big enough that even a wide test-fallback viewport (`viewport_size`
+        // has no real terminal to query here) times the 4x zoom factor
+        // still fits comfortably inside the map, so the pan isn't clamped
+        // back to 0 by simply running out of map to show.
+        let mut world = World::new(Map::new(2000, 2000, Tile::Floor));
+        let mut screen = Screen::Map { cam_x: 1000, cam_y: 1000, zoom: 0 };
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-t2");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-t2");
+        let save_path = tmp_path("save-t2");
+
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        match screen {
+            Screen::Map { cam_x, .. } => assert_eq!(cam_x, 1001, "one tile per press at 1x zoom"),
+            _ => panic!("expected Screen::Map"),
+        }
+
+        handle_key(KeyCode::Char('z'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        match screen {
+            Screen::Map { cam_x, .. } => assert_eq!(cam_x, 1005, "a whole 4-tile block per press at 4x zoom"),
+            _ => panic!("expected Screen::Map"),
+        }
     }
 }

@@ -296,10 +296,13 @@ fn scatter_items(map: &Map, rng: &mut impl Rng) -> Vec<(Pos, Item)> {
         let y = rng.gen_range(1..map.height - 1);
         if is_open_ground(map.tile(x, y)) || map.tile(x, y) == Some(Tile::Floor) {
             let item = if rng.gen_bool(0.4) {
-                Item::food("Blueberries", 20)
+                // Blue '*' - the bush itself is the green 'b', these are
+                // what it drops.
+                Item::food("Blueberries", 20).with_glyph('*', scourge_core::TileColor::Blue)
             } else {
-                // A gray '*' reads more like a rock than a generic '?'.
-                Item::new("Rock").with_glyph('*', scourge_core::TileColor::Gray)
+                // A gray '*' reads more like a rock than a generic '?', and
+                // a rock is a real (if crude) improvised weapon over fists.
+                Item::new("Rock").with_glyph('*', scourge_core::TileColor::Gray).with_melee_damage(14)
             };
             items.push((Pos { x, y }, item));
         }

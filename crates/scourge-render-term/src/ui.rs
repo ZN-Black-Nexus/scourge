@@ -103,8 +103,12 @@ pub enum Screen {
     /// The sidebar becomes that list while this is open.
     View { mode: ViewMode, index: usize },
     /// Birds-eye view of everything explored so far, pannable independently
-    /// of the player - `cam_x`/`cam_y` are the top-left world coordinate.
-    Map { cam_x: i32, cam_y: i32 },
+    /// of the player - `cam_x`/`cam_y` are the top-left world coordinate,
+    /// in world tiles regardless of zoom. `zoom` indexes `MAP_ZOOM_FACTORS`
+    /// - only two levels for now since the map itself is still small
+    /// enough that zoom is a convenience, not (yet) a necessity the way it
+    /// is on DDA's real, effectively-unbounded overmap.
+    Map { cam_x: i32, cam_y: i32, zoom: usize },
     Pause { selected: usize },
     /// Picks a settings category (Movement, Sidebar) rather than a single
     /// flat list of everything - keeps each category's own items readable
@@ -148,7 +152,7 @@ pub fn draw(
             draw_look(frame, world, display, explored, visible, *cursor_x, *cursor_y)
         }
         Screen::View { mode, index } => draw_view(frame, world, display, explored, visible, *mode, *index),
-        Screen::Map { cam_x, cam_y } => draw_map_screen(frame, world, explored, *cam_x, *cam_y),
+        Screen::Map { cam_x, cam_y, zoom } => draw_map_screen(frame, world, explored, *cam_x, *cam_y, *zoom),
         Screen::NameEntry { name } => draw_name_entry(frame, name),
         Screen::StatAllocation { stats, pool, selected } => draw_stat_allocation(frame, *stats, *pool, *selected),
         _ => draw_game(frame, world, display, camera, explored, visible),
@@ -832,22 +836,38 @@ fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i3
 /// terrain features like roads/forests/named buildings across a huge area)
 /// with its own generation and legend. That's a substantially bigger,
 /// separate system - a good candidate to design next, not implemented here.
-fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x: i32, cam_y: i32) {
+/// `MAP_ZOOM_FACTORS[zoom]` is how many world tiles one screen cell covers
+/// at that zoom level - index 0 is the normal 1:1 view, index 1 is zoomed
+/// out (each cell samples one tile out of a `factor`-sized block, so more
+/// of the map fits on screen at once at reduced fidelity). Only two levels
+/// for now, matching the map's current small, fixed size.
+pub const MAP_ZOOM_FACTORS: [i32; 2] = [1, 4];
+
+fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x: i32, cam_y: i32, zoom: usize) {
     let area = frame.area();
     let map_height = area.height.saturating_sub(1);
     let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
+    let factor = MAP_ZOOM_FACTORS[zoom];
 
     let lines: Vec<Line> = (0..viewport_h)
         .map(|screen_y| {
-            let world_y = cam_y + screen_y;
+            let block_y = cam_y + screen_y * factor;
             build_row((0..viewport_w).map(|screen_x| {
-                let world_x = cam_x + screen_x;
-                if world_x == world.player.pos.x && world_y == world.player.pos.y {
+                let block_x = cam_x + screen_x * factor;
+                // At zoom-out, a whole block maps to one cell - show the
+                // player whenever they're anywhere in that block, not only
+                // on the exact sampled tile, or they could vanish from
+                // their own overview.
+                let player_in_block = world.player.pos.x >= block_x
+                    && world.player.pos.x < block_x + factor
+                    && world.player.pos.y >= block_y
+                    && world.player.pos.y < block_y + factor;
+                if player_in_block {
                     ('@', Style::default().fg(player_color()))
-                } else if explored.is_seen(world_x, world_y) {
-                    match world.items_at(world_x, world_y).last() {
+                } else if explored.is_seen(block_x, block_y) {
+                    match world.items_at(block_x, block_y).last() {
                         Some(item) => (item.glyph, Style::default().fg(ratatui_color(item.color))),
-                        None => (world.map.glyph_at(world_x, world_y), Style::default().fg(Color::DarkGray)),
+                        None => (world.map.glyph_at(block_x, block_y), Style::default().fg(Color::DarkGray)),
                     }
                 } else {
                     (' ', Style::default())
@@ -860,10 +880,8 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x:
         Rect::new(0, 0, area.width, map_height),
     );
 
-    frame.render_widget(
-        Paragraph::new("Map - move to look around, Esc to return"),
-        Rect::new(0, map_height, area.width, 1),
-    );
+    let hint = format!("Map ({}x zoom, z to toggle) - move to look around, Esc to return", factor);
+    frame.render_widget(Paragraph::new(hint), Rect::new(0, map_height, area.width, 1));
 }
 
 /// 'i': a DDA-style lettered item list. Minimal first pass - no weight,
@@ -1015,20 +1033,29 @@ fn draw_examine_npc(frame: &mut Frame, world: &World, npc_index: usize, selected
     frame.render_widget(list, popup);
 }
 
+/// Highlights each item's leading character (white) against the rest of
+/// the label (gray) - real BN colors the hotkey letter itself (e.g. lime)
+/// so a player can tell which key to press without guessing rather than
+/// risk pressing something by accident; white/gray follows the same idea
+/// with only the two colors wanted for menus right now. Every item drawn
+/// via `draw_menu` (Pause, Settings) binds its own first letter as a
+/// direct key, so this always points at a real shortcut, never just a
+/// coincidental first letter.
+fn hotkey_line(label: &str, selected: bool) -> Line<'static> {
+    let modifier = if selected { Modifier::REVERSED } else { Modifier::empty() };
+    let mut chars = label.chars();
+    let first = chars.next().map(|c| c.to_string()).unwrap_or_default();
+    let rest: String = chars.collect();
+    Line::from(vec![
+        Span::styled(first, Style::default().fg(Color::White).add_modifier(modifier)),
+        Span::styled(rest, Style::default().fg(Color::Gray).add_modifier(modifier)),
+    ])
+}
+
 fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {
     let popup = centered_rect(50, 40, frame.area());
-    let list_items: Vec<ListItem> = items
-        .iter()
-        .enumerate()
-        .map(|(i, label)| {
-            let style = if i == selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            ListItem::new(*label).style(style)
-        })
-        .collect();
+    let list_items: Vec<ListItem> =
+        items.iter().enumerate().map(|(i, label)| ListItem::new(hotkey_line(label, i == selected))).collect();
     let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
