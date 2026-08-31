@@ -936,6 +936,24 @@ impl World {
         self.ground_items.get(&(x, y)).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Every ground item currently within `visible`, nearest to the player
+    /// first (then by name, for a stable order when several tie on
+    /// distance) - the 'V' view screen's item list.
+    pub fn visible_items(&self, visible: &VisibleSet) -> Vec<(Pos, &Item)> {
+        let mut items: Vec<(Pos, &Item)> = self
+            .ground_items
+            .iter()
+            .filter(|((x, y), _)| visible.is_visible(*x, *y))
+            .flat_map(|(&(x, y), stack)| stack.iter().map(move |item| (Pos { x, y }, item)))
+            .collect();
+        items.sort_by_key(|(pos, item)| {
+            let dx = pos.x - self.player.pos.x;
+            let dy = pos.y - self.player.pos.y;
+            (dx * dx + dy * dy, item.name.clone())
+        });
+        items
+    }
+
     pub fn npc_at(&self, x: i32, y: i32) -> Option<&Npc> {
         self.npcs.iter().find(|n| n.pos.x == x && n.pos.y == y)
     }
@@ -1432,6 +1450,21 @@ mod tests {
         // Picking up again with nothing there costs no turn.
         world.step(Action::PickUp);
         assert_eq!(world.turn, 1);
+    }
+
+    #[test]
+    fn visible_items_lists_only_what_is_in_sight_nearest_first() {
+        let map = Map::new(20, 20, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 10, y: 10 };
+        world.place_item(12, 10, Item::new("Far Rock"));
+        world.place_item(11, 10, Item::new("Near Rock"));
+        world.place_item(2, 2, Item::new("Out Of Sight Rock")); // far outside the radius below
+
+        let visible = world.map.visible_from(world.player.pos, 5);
+        let items = world.visible_items(&visible);
+        let names: Vec<&str> = items.iter().map(|(_, i)| i.name.as_str()).collect();
+        assert_eq!(names, vec!["Near Rock", "Far Rock"], "nearest first, and the out-of-range one excluded");
     }
 
     #[test]

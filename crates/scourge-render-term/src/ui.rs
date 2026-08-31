@@ -53,10 +53,21 @@ pub(crate) const SIGHT_RADIUS: i32 = 60;
 const NEAR_RADIUS: i32 = 20;
 
 pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
-/// The Settings list has dynamic items (current sidebar side, compass
-/// cardinal style), so its content is built in `draw_settings`; this is
-/// just the nav bound.
-pub const SETTINGS_ITEM_COUNT: usize = 7;
+/// Settings is a category picker, not one long flat list - each category
+/// opens its own screen with its own items.
+pub const SETTINGS_CATEGORIES: [&str; 2] = ["Movement", "Sidebar"];
+pub const MOVEMENT_SETTINGS_ITEM_COUNT: usize = 3;
+/// The Sidebar Settings list has dynamic items (current side, width
+/// percent, compass cardinal style, limb layout), so its content is built
+/// in `draw_sidebar_settings`; this is just the nav bound.
+pub const SIDEBAR_SETTINGS_ITEM_COUNT: usize = 5;
+
+/// What 'V' (view) is currently listing - Tab switches between the two.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Items,
+    Creatures,
+}
 
 pub enum Screen {
     Game,
@@ -86,11 +97,21 @@ pub enum Screen {
     /// memory-only like the map screen), lets you inspect anything within
     /// it even off the normal viewport, without moving or costing a turn.
     Look { cursor_x: i32, cursor_y: i32 },
+    /// Shift+V: auto-highlights everything currently visible instead of
+    /// requiring a manual cursor - Tab switches between listing items and
+    /// listing creatures, `index` selects within whichever list is active.
+    /// The sidebar becomes that list while this is open.
+    View { mode: ViewMode, index: usize },
     /// Birds-eye view of everything explored so far, pannable independently
     /// of the player - `cam_x`/`cam_y` are the top-left world coordinate.
     Map { cam_x: i32, cam_y: i32 },
     Pause { selected: usize },
+    /// Picks a settings category (Movement, Sidebar) rather than a single
+    /// flat list of everything - keeps each category's own items readable
+    /// as the number of settings grows.
     Settings { selected: usize },
+    MovementSettings { selected: usize },
+    SidebarSettings { selected: usize },
     CustomBinds { selected: usize },
     AwaitingKey { direction: Direction },
     /// '?': a keybind reference, dismissed by any key - built from the
@@ -124,15 +145,21 @@ pub fn draw(
 ) {
     match screen {
         Screen::Look { cursor_x, cursor_y } => {
-            draw_look(frame, world, explored, visible, *cursor_x, *cursor_y)
+            draw_look(frame, world, display, explored, visible, *cursor_x, *cursor_y)
         }
+        Screen::View { mode, index } => draw_view(frame, world, display, explored, visible, *mode, *index),
         Screen::Map { cam_x, cam_y } => draw_map_screen(frame, world, explored, *cam_x, *cam_y),
         Screen::NameEntry { name } => draw_name_entry(frame, name),
         Screen::StatAllocation { stats, pool, selected } => draw_stat_allocation(frame, *stats, *pool, *selected),
         _ => draw_game(frame, world, display, camera, explored, visible),
     }
     match screen {
-        Screen::Game | Screen::Look { .. } | Screen::Map { .. } | Screen::NameEntry { .. } | Screen::StatAllocation { .. } => {}
+        Screen::Game
+        | Screen::Look { .. }
+        | Screen::View { .. }
+        | Screen::Map { .. }
+        | Screen::NameEntry { .. }
+        | Screen::StatAllocation { .. } => {}
         Screen::Inventory => draw_inventory(frame, world),
         Screen::Skills => draw_skills(frame, world),
         Screen::WieldSelect => draw_wield_select(frame, world),
@@ -142,7 +169,9 @@ pub fn draw(
         Screen::Examine { x, y } => draw_examine(frame, world, explored, visible, *x, *y),
         Screen::ExamineNpc { npc_index, selected } => draw_examine_npc(frame, world, *npc_index, *selected),
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
-        Screen::Settings { selected } => draw_settings(frame, display, *selected),
+        Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_CATEGORIES, *selected),
+        Screen::MovementSettings { selected } => draw_movement_settings(frame, *selected),
+        Screen::SidebarSettings { selected } => draw_sidebar_settings(frame, display, *selected),
         Screen::CustomBinds { selected } => draw_custom_binds(frame, binds, *selected),
         Screen::AwaitingKey { direction } => draw_awaiting_key(frame, *direction),
         Screen::Help => draw_help(frame, binds),
@@ -313,22 +342,7 @@ fn draw_game(
     explored: &mut Explored,
     visible: &VisibleSet,
 ) {
-    let area = frame.area();
-    let sidebar_width = sidebar_width(area.width, display.sidebar_width_percent);
-    // The constraint *order* determines physical left/right position, so
-    // this has to flip which constraint comes first, not just relabel the
-    // resulting rects afterward.
-    let constraints = if display.sidebar_on_left {
-        [Constraint::Length(sidebar_width), Constraint::Min(20)]
-    } else {
-        [Constraint::Min(20), Constraint::Length(sidebar_width)]
-    };
-    let columns = Layout::default().direction(LayoutDirection::Horizontal).constraints(constraints).split(area);
-    let (map_area, sidebar_area) = if display.sidebar_on_left {
-        (columns[1], columns[0])
-    } else {
-        (columns[0], columns[1])
-    };
+    let (map_area, sidebar_area) = map_and_sidebar_areas(frame.area(), display);
 
     let (viewport_w, viewport_h) = (map_area.width as i32, map_area.height as i32);
     camera.center_on(world.player.pos, viewport_w, viewport_h, world.map.width, world.map.height);
@@ -600,10 +614,37 @@ fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, vis
 /// DDA's look-around. Rendering still uses the player's real `visible`/
 /// `explored` data (you're looking with your own eyes, not omniscient),
 /// movement keys move the cursor instead of stepping the world.
-fn draw_look(frame: &mut Frame, world: &World, explored: &Explored, visible: &VisibleSet, cursor_x: i32, cursor_y: i32) {
-    let area = frame.area();
-    let map_height = area.height.saturating_sub(1);
-    let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
+/// Splits `area` into a map rect and a sidebar rect the same way
+/// `draw_game` does - shared so every screen that shows the map (Look,
+/// View) keeps the sidebar visible instead of borrowing the full frame
+/// width for itself, which used to make it disappear during 'x' look.
+fn map_and_sidebar_areas(area: Rect, display: &DisplaySettings) -> (Rect, Rect) {
+    let width = sidebar_width(area.width, display.sidebar_width_percent);
+    let constraints = if display.sidebar_on_left {
+        [Constraint::Length(width), Constraint::Min(20)]
+    } else {
+        [Constraint::Min(20), Constraint::Length(width)]
+    };
+    let columns = Layout::default().direction(LayoutDirection::Horizontal).constraints(constraints).split(area);
+    if display.sidebar_on_left {
+        (columns[1], columns[0])
+    } else {
+        (columns[0], columns[1])
+    }
+}
+
+fn draw_look(
+    frame: &mut Frame,
+    world: &World,
+    display: &DisplaySettings,
+    explored: &Explored,
+    visible: &VisibleSet,
+    cursor_x: i32,
+    cursor_y: i32,
+) {
+    let (map_area, sidebar_area) = map_and_sidebar_areas(frame.area(), display);
+    let map_height = map_area.height.saturating_sub(1);
+    let (viewport_w, viewport_h) = (map_area.width as i32, map_height as i32);
 
     let cam_x = (cursor_x - viewport_w / 2).clamp(0, (world.map.width - viewport_w).max(0));
     let cam_y = (cursor_y - viewport_h / 2).clamp(0, (world.map.height - viewport_h).max(0));
@@ -621,17 +662,123 @@ fn draw_look(frame: &mut Frame, world: &World, explored: &Explored, visible: &Vi
             }))
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(lines),
-        Rect::new(0, 0, area.width, map_height),
-    );
+    frame.render_widget(Paragraph::new(lines), Rect::new(map_area.x, map_area.y, map_area.width, map_height));
 
     let what = describe_tile(world, explored, visible, cursor_x, cursor_y);
     let status = format!("Look: {what} - move to look around, Esc to return");
     frame.render_widget(
         Paragraph::new(status),
-        Rect::new(0, map_height, area.width, 1),
+        Rect::new(map_area.x, map_area.y + map_height, map_area.width, 1),
     );
+
+    draw_sidebar(frame, world, display, visible, sidebar_area);
+}
+
+/// Shift+V: no manual cursor - everything currently visible is already
+/// listed and highlighted. Tab switches between the item list and the
+/// creature list; `index` picks within whichever is active. The sidebar
+/// becomes that list instead of the normal status panel while this is
+/// open, and the map camera follows the current selection instead of the
+/// player, same as Look's cursor does.
+fn draw_view(
+    frame: &mut Frame,
+    world: &World,
+    display: &DisplaySettings,
+    explored: &Explored,
+    visible: &VisibleSet,
+    mode: ViewMode,
+    index: usize,
+) {
+    let (map_area, sidebar_area) = map_and_sidebar_areas(frame.area(), display);
+    let map_height = map_area.height.saturating_sub(1);
+    let (viewport_w, viewport_h) = (map_area.width as i32, map_height as i32);
+
+    let items = world.visible_items(visible);
+    let creatures: Vec<&scourge_core::Npc> = world.npcs.iter().filter(|n| visible.is_visible(n.pos.x, n.pos.y)).collect();
+
+    let selected_pos = match mode {
+        ViewMode::Items => items.get(index).map(|(pos, _)| *pos),
+        ViewMode::Creatures => creatures.get(index).map(|n| n.pos),
+    }
+    .unwrap_or(world.player.pos);
+
+    let cam_x = (selected_pos.x - viewport_w / 2).clamp(0, (world.map.width - viewport_w).max(0));
+    let cam_y = (selected_pos.y - viewport_h / 2).clamp(0, (world.map.height - viewport_h).max(0));
+
+    let lines: Vec<Line> = (0..viewport_h)
+        .map(|screen_y| {
+            let world_y = cam_y + screen_y;
+            build_row((0..viewport_w).map(|screen_x| {
+                let world_x = cam_x + screen_x;
+                let (glyph, style) = cell(world, explored, visible, world_x, world_y);
+                if world_x == selected_pos.x && world_y == selected_pos.y {
+                    (glyph, style.add_modifier(Modifier::REVERSED))
+                } else {
+                    (glyph, style)
+                }
+            }))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), Rect::new(map_area.x, map_area.y, map_area.width, map_height));
+
+    let hint = match mode {
+        ViewMode::Items => "View: Items - Tab: Creatures, Esc: return",
+        ViewMode::Creatures => "View: Creatures - Tab: Items, Esc: return",
+    };
+    frame.render_widget(Paragraph::new(hint), Rect::new(map_area.x, map_area.y + map_height, map_area.width, 1));
+
+    draw_view_list(frame, mode, &items, &creatures, index, display, sidebar_area);
+}
+
+fn draw_view_list(
+    frame: &mut Frame,
+    mode: ViewMode,
+    items: &[(scourge_core::Pos, &scourge_core::Item)],
+    creatures: &[&scourge_core::Npc],
+    index: usize,
+    display: &DisplaySettings,
+    area: Rect,
+) {
+    let mut lines = vec![match mode {
+        ViewMode::Items => Line::raw("Items (Tab: Creatures)"),
+        ViewMode::Creatures => Line::raw("Creatures (Tab: Items)"),
+    }];
+    lines.push(Line::raw(""));
+
+    let marker = |i: usize| if i == index { "> " } else { "  " };
+    match mode {
+        ViewMode::Items => {
+            if items.is_empty() {
+                lines.push(Line::raw("  (nothing here)"));
+            }
+            for (i, (_, item)) in items.iter().enumerate() {
+                lines.push(Line::raw(format!("{}{}", marker(i), item.name)));
+            }
+        }
+        ViewMode::Creatures => {
+            if creatures.is_empty() {
+                lines.push(Line::raw("  (nothing here)"));
+            }
+            for (i, npc) in creatures.iter().enumerate() {
+                let attitude_label = match npc.attitude {
+                    Attitude::Friendly => "Friendly",
+                    Attitude::Hostile => "Hostile",
+                };
+                let (current, max) = npc.health.total();
+                lines.push(Line::from(vec![
+                    Span::raw(marker(i).to_string()),
+                    Span::styled(npc.glyph.to_string(), Style::default().fg(ratatui_color(npc.color))),
+                    Span::raw(format!(" {} ", npc.name)),
+                    Span::styled(attitude_label, Style::default().fg(attitude_color(npc.attitude))),
+                    Span::raw(format!(" {}", hp_bar(current, max))),
+                ]));
+            }
+        }
+    }
+
+    let border = if display.sidebar_on_left { Borders::RIGHT } else { Borders::LEFT };
+    let block = Block::default().title("Scourge").borders(border);
+    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }).block(block), area);
 }
 
 fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32) -> String {
@@ -888,20 +1035,34 @@ fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {
 /// Same list-with-selection look as `draw_menu`, but some items' labels
 /// are dynamic (current sidebar side, compass cardinal style), so it can't
 /// be a plain `&[&str]`.
-fn draw_settings(frame: &mut Frame, display: &DisplaySettings, selected: usize) {
+fn draw_movement_settings(frame: &mut Frame, selected: usize) {
+    let items = ["Vi-keys (hjkl + yubn)", "WASD (wasd + qezc)", "Custom keybinds..."];
+    let popup = centered_rect(50, 30, frame.area());
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let style = if i == selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+            ListItem::new(*label).style(style)
+        })
+        .collect();
+    let list = List::new(list_items).block(Block::default().title("Movement Settings").borders(Borders::ALL));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
+fn draw_sidebar_settings(frame: &mut Frame, display: &DisplaySettings, selected: usize) {
     let side = if display.sidebar_on_left { "Left" } else { "Right" };
     let cardinals = if display.compass_abbreviate_cardinals { "Abbreviated (N/S/E/W)" } else { "Full words" };
     let limbs = if display.limbs_two_rows { "2 rows of 3 (space permitting)" } else { "Single column" };
     let items = [
-        "Movement: Vi-keys (hjkl + yubn)".to_string(),
-        "Movement: WASD (wasd + qezc)".to_string(),
-        "Custom keybinds...".to_string(),
-        format!("Sidebar: {side} (Enter to switch)"),
+        format!("Side: {side} (Enter to switch)"),
+        format!("Width: {}% (Left/Right to adjust)", display.sidebar_width_percent.clamp(MIN_SIDEBAR_PERCENT, MAX_SIDEBAR_PERCENT)),
         format!("Compass cardinals: {cardinals} (Enter to toggle)"),
-        format!("Sidebar width: {}% (Left/Right to adjust)", display.sidebar_width_percent.clamp(MIN_SIDEBAR_PERCENT, MAX_SIDEBAR_PERCENT)),
         format!("Limb layout: {limbs} (Enter to toggle)"),
+        "Reorder sections... (opens the same screen as '}')".to_string(),
     ];
-    let popup = centered_rect(50, 40, frame.area());
+    let popup = centered_rect(55, 40, frame.area());
     let list_items: Vec<ListItem> = items
         .into_iter()
         .enumerate()
@@ -910,7 +1071,7 @@ fn draw_settings(frame: &mut Frame, display: &DisplaySettings, selected: usize) 
             ListItem::new(label).style(style)
         })
         .collect();
-    let list = List::new(list_items).block(Block::default().title("Settings").borders(Borders::ALL));
+    let list = List::new(list_items).block(Block::default().title("Sidebar Settings").borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
 }
@@ -982,6 +1143,7 @@ fn draw_help(frame: &mut Frame, binds: &KeyBindings) {
         entry(binds, "Wait", Action::Wait),
         String::new(),
         "i: Inventory    m: Map    x: Look around    ?: This help".to_string(),
+        "Shift+V: View nearby items/creatures (Tab switches, arrows select)".to_string(),
         "}: Sidebar layout".to_string(),
         "Esc: Pause menu (Settings, Quit)".to_string(),
         String::new(),

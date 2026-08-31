@@ -131,6 +131,7 @@ pub fn run(mut world: World) -> io::Result<()> {
                         &config_path,
                         &mut display,
                         &settings_path,
+                        &visible,
                     ) {
                         return Ok(());
                     }
@@ -160,6 +161,7 @@ fn handle_key(
     config_path: &std::path::Path,
     display: &mut DisplaySettings,
     settings_path: &std::path::Path,
+    visible: &scourge_core::VisibleSet,
 ) -> bool {
     match screen {
         Screen::Game => {
@@ -183,6 +185,16 @@ fn handle_key(
                 *screen = Screen::Skills;
             } else if code == KeyCode::Char('}') {
                 *screen = Screen::SidebarOrder { selected: 0 };
+            } else if code == KeyCode::Char('V') {
+                // Starts on whichever list actually has something in it -
+                // items first, matching real DDA's own priority, falling
+                // back to creatures, or an empty item list if neither.
+                let mode = if world.visible_items(visible).is_empty() && world.npcs.iter().any(|n| visible.is_visible(n.pos.x, n.pos.y)) {
+                    ui::ViewMode::Creatures
+                } else {
+                    ui::ViewMode::Items
+                };
+                *screen = Screen::View { mode, index: 0 };
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 match action {
                     // UI-only - never reach world.step, just switch screens.
@@ -327,12 +339,27 @@ fn handle_key(
             },
             _ => {}
         },
+        // The category picker - each category is its own screen below,
+        // so this list doesn't grow unreadable as more settings get added.
         Screen::Settings { selected } => match code {
             KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
-                *selected = (*selected + 1).min(ui::SETTINGS_ITEM_COUNT - 1)
+                *selected = (*selected + 1).min(ui::SETTINGS_CATEGORIES.len() - 1)
             }
             KeyCode::Esc => *screen = Screen::Pause { selected: 1 },
+            KeyCode::Enter => match *selected {
+                0 => *screen = Screen::MovementSettings { selected: 0 },
+                1 => *screen = Screen::SidebarSettings { selected: 0 },
+                _ => {}
+            },
+            _ => {}
+        },
+        Screen::MovementSettings { selected } => match code {
+            KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                *selected = (*selected + 1).min(ui::MOVEMENT_SETTINGS_ITEM_COUNT - 1)
+            }
+            KeyCode::Esc => *screen = Screen::Settings { selected: 0 },
             KeyCode::Enter => match *selected {
                 0 => {
                     *binds = KeyBindings::preset_vi();
@@ -343,26 +370,38 @@ fn handle_key(
                     let _ = binds.save(config_path);
                 }
                 2 => *screen = Screen::CustomBinds { selected: 0 },
-                3 => {
+                _ => {}
+            },
+            _ => {}
+        },
+        Screen::SidebarSettings { selected } => match code {
+            KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                *selected = (*selected + 1).min(ui::SIDEBAR_SETTINGS_ITEM_COUNT - 1)
+            }
+            KeyCode::Esc => *screen = Screen::Settings { selected: 1 },
+            KeyCode::Enter => match *selected {
+                0 => {
                     display.sidebar_on_left = !display.sidebar_on_left;
                     let _ = display.save(settings_path);
                 }
-                4 => {
+                2 => {
                     display.compass_abbreviate_cardinals = !display.compass_abbreviate_cardinals;
                     let _ = display.save(settings_path);
                 }
-                6 => {
+                3 => {
                     display.limbs_two_rows = !display.limbs_two_rows;
                     let _ = display.save(settings_path);
                 }
+                4 => *screen = Screen::SidebarOrder { selected: 0 },
                 _ => {}
             },
-            KeyCode::Left if *selected == 5 => {
+            KeyCode::Left if *selected == 1 => {
                 display.sidebar_width_percent =
                     display.sidebar_width_percent.saturating_sub(ui::SIDEBAR_WIDTH_STEP).max(ui::MIN_SIDEBAR_PERCENT);
                 let _ = display.save(settings_path);
             }
-            KeyCode::Right if *selected == 5 => {
+            KeyCode::Right if *selected == 1 => {
                 display.sidebar_width_percent =
                     (display.sidebar_width_percent + ui::SIDEBAR_WIDTH_STEP).min(ui::MAX_SIDEBAR_PERCENT);
                 let _ = display.save(settings_path);
@@ -372,7 +411,7 @@ fn handle_key(
         Screen::CustomBinds { selected } => match code {
             KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1).min(DIRECTIONS.len() - 1),
-            KeyCode::Esc => *screen = Screen::Settings { selected: 2 },
+            KeyCode::Esc => *screen = Screen::MovementSettings { selected: 2 },
             KeyCode::Enter => {
                 *screen = Screen::AwaitingKey {
                     direction: DIRECTIONS[*selected],
@@ -466,6 +505,27 @@ fn handle_key(
                 _ => {}
             }
         }
+        Screen::View { mode, index } => match code {
+            KeyCode::Esc => *screen = Screen::Game,
+            KeyCode::Tab => {
+                *mode = match *mode {
+                    ui::ViewMode::Items => ui::ViewMode::Creatures,
+                    ui::ViewMode::Creatures => ui::ViewMode::Items,
+                };
+                *index = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => *index = index.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                let len = match *mode {
+                    ui::ViewMode::Items => world.visible_items(visible).len(),
+                    ui::ViewMode::Creatures => world.npcs.iter().filter(|n| visible.is_visible(n.pos.x, n.pos.y)).count(),
+                };
+                if len > 0 {
+                    *index = (*index + 1).min(len - 1);
+                }
+            }
+            _ => {}
+        },
         Screen::GameOver => return false,
     }
     true
@@ -490,20 +550,21 @@ mod tests {
         let mut world = test_world();
         let mut screen = Screen::NameEntry { name: String::new() };
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-a");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-a");
 
         for c in "Riko".chars() {
-            handle_key(KeyCode::Char(c), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+            handle_key(KeyCode::Char(c), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         }
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert_eq!(world.player.name, "Riko");
         assert!(matches!(screen, Screen::StatAllocation { .. }));
 
         // Spend 2 points into Strength (selected index 0 by default).
-        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
-        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         if let Screen::StatAllocation { stats, pool, .. } = &screen {
             assert_eq!(stats.strength, 10);
             assert_eq!(*pool, 2);
@@ -511,7 +572,7 @@ mod tests {
             panic!("expected StatAllocation");
         }
 
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(matches!(screen, Screen::Game));
         assert_eq!(world.player.stats.strength, 10);
         assert_eq!(world.player.health.total().1, Health::from_strength(10).total().1);
@@ -522,11 +583,12 @@ mod tests {
         let mut world = test_world();
         let mut screen = Screen::NameEntry { name: String::new() };
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-b");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-b");
 
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert_eq!(world.player.name, "Survivor");
     }
 
@@ -538,16 +600,17 @@ mod tests {
 
         let mut screen = Screen::ExamineDirection;
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-c");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-c");
 
         // 'l' is East in the vi preset.
-        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(matches!(screen, Screen::ExamineNpc { npc_index: 0, selected: 0 }));
 
         // Enter on the default selection (Talk) should reach World::step.
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(matches!(screen, Screen::Game));
         assert_eq!(world.last_message.as_deref(), Some("\"Hey there.\" - Ally"));
     }
@@ -564,16 +627,17 @@ mod tests {
 
         let mut screen = Screen::ExamineDirection;
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-g");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-g");
 
-        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(matches!(screen, Screen::ExamineNpc { npc_index: 0, selected: 0 }));
 
         // Enter on the default selection (Attack, for a hostile) should
         // reach World::step and defeat it (1 HP left, 10 damage).
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(matches!(screen, Screen::Game));
         assert_eq!(world.last_message.as_deref(), Some("You defeated the Zombie."));
         assert!(world.npcs.is_empty());
@@ -594,11 +658,12 @@ mod tests {
 
         let mut screen = Screen::Game;
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-h");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-h");
 
-        handle_key(KeyCode::Char('.'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Char('.'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(world.player.health.is_dead());
     }
 
@@ -607,12 +672,66 @@ mod tests {
         let mut world = test_world();
         let mut screen = Screen::GameOver;
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-i");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-i");
 
-        let keep_running = handle_key(KeyCode::Char('x'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        let keep_running = handle_key(KeyCode::Char('x'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(!keep_running);
+    }
+
+    #[test]
+    fn shift_v_opens_view_on_items_when_items_are_visible() {
+        let mut world = test_world();
+        world.place_item(world.player.pos.x, world.player.pos.y, scourge_core::Item::new("Rock"));
+        let mut screen = Screen::Game;
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-m");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-m");
+
+        handle_key(KeyCode::Char('V'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::View { mode: ui::ViewMode::Items, index: 0 }));
+    }
+
+    #[test]
+    fn shift_v_falls_back_to_creatures_when_no_items_are_visible() {
+        let mut world = test_world();
+        world.npcs.push(scourge_core::Npc::new("Ally", world.player.pos, scourge_core::Attitude::Friendly));
+        let mut screen = Screen::Game;
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-n");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-n");
+
+        handle_key(KeyCode::Char('V'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::View { mode: ui::ViewMode::Creatures, index: 0 }));
+    }
+
+    #[test]
+    fn view_tab_switches_mode_and_resets_index_and_up_down_clamp() {
+        let mut world = test_world();
+        world.place_item(world.player.pos.x, world.player.pos.y, scourge_core::Item::new("Rock"));
+        world.npcs.push(scourge_core::Npc::new("Ally", world.player.pos, scourge_core::Attitude::Friendly));
+        let mut screen = Screen::View { mode: ui::ViewMode::Items, index: 0 };
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-o");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-o");
+
+        // Only one item, so Down shouldn't move past index 0.
+        handle_key(KeyCode::Down, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::View { mode: ui::ViewMode::Items, index: 0 }));
+
+        handle_key(KeyCode::Tab, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::View { mode: ui::ViewMode::Creatures, index: 0 }));
+
+        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::Game));
     }
 
     #[test]
@@ -622,11 +741,12 @@ mod tests {
 
         let mut screen = Screen::ExamineDirection;
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-d");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-d");
 
-        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(matches!(screen, Screen::Examine { x: 6, y: 5 }));
     }
 
@@ -636,6 +756,7 @@ mod tests {
         // Start on Hunger (index 1): '+' should raise it above Health.
         let mut screen = Screen::SidebarOrder { selected: 1 };
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-e");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-e");
@@ -643,7 +764,7 @@ mod tests {
 
         assert_eq!(display.sidebar_order[0], SidebarSection::Health);
         assert_eq!(display.sidebar_order[1], SidebarSection::Hunger);
-        handle_key(KeyCode::Char('+'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Char('+'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert_eq!(display.sidebar_order[0], SidebarSection::Hunger);
         assert_eq!(display.sidebar_order[1], SidebarSection::Health);
         assert!(matches!(screen, Screen::SidebarOrder { selected: 0 }));
@@ -652,7 +773,7 @@ mod tests {
         assert_eq!(reloaded.sidebar_order[0], SidebarSection::Hunger);
 
         // '-' should lower it right back below Health.
-        handle_key(KeyCode::Char('-'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Char('-'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert_eq!(display.sidebar_order[0], SidebarSection::Health);
         assert_eq!(display.sidebar_order[1], SidebarSection::Hunger);
         assert!(matches!(screen, Screen::SidebarOrder { selected: 1 }));
@@ -663,28 +784,29 @@ mod tests {
     #[test]
     fn settings_screen_adjusts_sidebar_width_with_left_right_and_clamps() {
         let mut world = test_world();
-        let mut screen = Screen::Settings { selected: 5 };
+        let mut screen = Screen::SidebarSettings { selected: 1 };
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-j");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-j");
         let _ = std::fs::remove_file(&settings_path);
 
         assert_eq!(display.sidebar_width_percent, 25);
-        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert_eq!(display.sidebar_width_percent, 30);
-        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
-        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert_eq!(display.sidebar_width_percent, 20);
 
         // Clamp at the top.
         display.sidebar_width_percent = ui::MAX_SIDEBAR_PERCENT;
-        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert_eq!(display.sidebar_width_percent, ui::MAX_SIDEBAR_PERCENT);
 
         // Clamp at the bottom.
         display.sidebar_width_percent = ui::MIN_SIDEBAR_PERCENT;
-        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert_eq!(display.sidebar_width_percent, ui::MIN_SIDEBAR_PERCENT);
 
         let _ = std::fs::remove_file(&settings_path);
@@ -693,18 +815,41 @@ mod tests {
     #[test]
     fn settings_screen_toggles_limb_layout() {
         let mut world = test_world();
-        let mut screen = Screen::Settings { selected: 6 };
+        let mut screen = Screen::SidebarSettings { selected: 3 };
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-k");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-k");
         let _ = std::fs::remove_file(&settings_path);
 
         assert!(display.limbs_two_rows);
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(!display.limbs_two_rows);
 
         let _ = std::fs::remove_file(&settings_path);
+    }
+
+    #[test]
+    fn settings_screen_opens_the_right_category_and_esc_returns_to_it() {
+        let mut world = test_world();
+        let mut screen = Screen::Settings { selected: 0 };
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-l");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-l");
+
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::MovementSettings { selected: 0 }));
+        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::Settings { selected: 0 }));
+
+        handle_key(KeyCode::Down, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::SidebarSettings { selected: 0 }));
+        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        assert!(matches!(screen, Screen::Settings { selected: 1 }));
     }
 
     #[test]
@@ -712,11 +857,12 @@ mod tests {
         let mut world = test_world();
         let mut screen = Screen::Game;
         let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
         let config_path = tmp_path("binds-f");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-f");
 
-        handle_key(KeyCode::Char('}'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path);
+        handle_key(KeyCode::Char('}'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         assert!(matches!(screen, Screen::SidebarOrder { selected: 0 }));
     }
 }
