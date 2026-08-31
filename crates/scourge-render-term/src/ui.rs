@@ -52,7 +52,7 @@ pub(crate) const SIGHT_RADIUS: i32 = 60;
 /// which reads as flatter/less natural than DDA's real vision.
 const NEAR_RADIUS: i32 = 20;
 
-pub const PAUSE_ITEMS: [&str; 3] = ["Resume", "Settings", "Quit"];
+pub const PAUSE_ITEMS: [&str; 4] = ["Resume", "Settings", "Save and Quit", "Quit"];
 /// Settings is a category picker, not one long flat list - each category
 /// opens its own screen with its own items.
 pub const SETTINGS_CATEGORIES: [&str; 2] = ["Movement", "Sidebar"];
@@ -1147,7 +1147,7 @@ fn draw_help(frame: &mut Frame, binds: &KeyBindings) {
         "i: Inventory    m: Map    x: Look around    ?: This help".to_string(),
         "Shift+V: View nearby items/creatures (Tab switches, arrows select)".to_string(),
         "}: Sidebar layout".to_string(),
-        "Esc: Pause menu (Settings, Quit)".to_string(),
+        "Esc: Pause menu (R: resume, s: settings, S: save+quit, q: quit)".to_string(),
         String::new(),
         "(press any key to close)".to_string(),
     ];

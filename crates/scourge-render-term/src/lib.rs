@@ -91,6 +91,21 @@ pub fn run(mut world: World) -> io::Result<()> {
     let mut binds = KeyBindings::load(&config_path).unwrap_or_else(|_| KeyBindings::preset_vi());
     let settings_path = PathBuf::from("config/settings.json");
     let mut display = DisplaySettings::load(&settings_path).unwrap_or_default();
+    let save_path = PathBuf::from("config/save.json");
+
+    // A save on disk means a survivor already exists - skip character
+    // creation and drop straight into their game instead of starting a new
+    // one over it. An unreadable/corrupt save is treated the same as no
+    // save at all (falls through to a fresh character) rather than erroring
+    // out of the whole game.
+    let mut screen = Screen::NameEntry { name: String::new() };
+    if let Ok(data) = std::fs::read_to_string(&save_path) {
+        if let Ok(save) = serde_json::from_str::<scourge_core::SaveData>(&data) {
+            world = World::from_save(save);
+            screen = Screen::Game;
+        }
+    }
+
     let mut camera = Camera::new();
     let mut explored = Explored::new(world.map.width, world.map.height);
 
@@ -103,8 +118,6 @@ pub fn run(mut world: World) -> io::Result<()> {
     // moment the door opens, not only once you've stepped through it.
     let mut visible = world.map.visible_from(world.player.pos, ui::SIGHT_RADIUS);
     let mut last_turn = world.turn;
-
-    let mut screen = Screen::NameEntry { name: String::new() };
 
     loop {
         if world.turn != last_turn {
@@ -132,6 +145,7 @@ pub fn run(mut world: World) -> io::Result<()> {
                         &mut display,
                         &settings_path,
                         &visible,
+                        &save_path,
                     ) {
                         return Ok(());
                     }
@@ -141,6 +155,11 @@ pub fn run(mut world: World) -> io::Result<()> {
                     // (waiting, picking something up, and so on).
                     if world.player.health.is_dead() && !matches!(screen, Screen::GameOver) {
                         screen = Screen::GameOver;
+                        // Permadeath: a dead character's save would just
+                        // reload straight back into the death they already
+                        // had, forever - clear it so the next launch starts
+                        // a fresh character instead.
+                        let _ = std::fs::remove_file(&save_path);
                     }
                 }
                 _ => {}
@@ -149,6 +168,18 @@ pub fn run(mut world: World) -> io::Result<()> {
                 break;
             }
         }
+    }
+}
+
+/// Best-effort save - if it fails (no write permission, disk full, ...)
+/// quitting still works, it just doesn't persist. Nothing else currently
+/// depends on a save actually succeeding.
+fn save_game(world: &World, save_path: &std::path::Path) {
+    if let Some(parent) = save_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&world.to_save()) {
+        let _ = std::fs::write(save_path, json);
     }
 }
 
@@ -162,6 +193,7 @@ fn handle_key(
     display: &mut DisplaySettings,
     settings_path: &std::path::Path,
     visible: &scourge_core::VisibleSet,
+    save_path: &std::path::Path,
 ) -> bool {
     match screen {
         Screen::Game => {
@@ -325,16 +357,30 @@ fn handle_key(
                 *cam_y = (*cam_y + dy).clamp(0, (world.map.height - vh).max(0));
             }
         }
+        // Arrow/jk + Enter still works throughout (unchanged), but each
+        // item also has a direct letter so a returning player doesn't have
+        // to navigate to it every time - matching keys DDA/BN players
+        // already have muscle memory for (q to quit, Esc/R to resume).
         Screen::Pause { selected } => match code {
             KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
                 *selected = (*selected + 1).min(ui::PAUSE_ITEMS.len() - 1)
             }
-            KeyCode::Esc => *screen = Screen::Game,
+            KeyCode::Esc | KeyCode::Char('R') => *screen = Screen::Game,
+            KeyCode::Char('s') => *screen = Screen::Settings { selected: 0 },
+            KeyCode::Char('S') => {
+                save_game(world, save_path);
+                return false;
+            }
+            KeyCode::Char('q') => return false,
             KeyCode::Enter => match *selected {
                 0 => *screen = Screen::Game,
                 1 => *screen = Screen::Settings { selected: 0 },
-                2 => return false,
+                2 => {
+                    save_game(world, save_path);
+                    return false;
+                }
+                3 => return false,
                 _ => {}
             },
             _ => {}
@@ -347,6 +393,8 @@ fn handle_key(
                 *selected = (*selected + 1).min(ui::SETTINGS_CATEGORIES.len() - 1)
             }
             KeyCode::Esc => *screen = Screen::Pause { selected: 1 },
+            KeyCode::Char('m') => *screen = Screen::MovementSettings { selected: 0 },
+            KeyCode::Char('s') => *screen = Screen::SidebarSettings { selected: 0 },
             KeyCode::Enter => match *selected {
                 0 => *screen = Screen::MovementSettings { selected: 0 },
                 1 => *screen = Screen::SidebarSettings { selected: 0 },
@@ -554,17 +602,18 @@ mod tests {
         let config_path = tmp_path("binds-a");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-a");
+        let save_path = tmp_path("save-a");
 
         for c in "Riko".chars() {
-            handle_key(KeyCode::Char(c), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+            handle_key(KeyCode::Char(c), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         }
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert_eq!(world.player.name, "Riko");
         assert!(matches!(screen, Screen::StatAllocation { .. }));
 
         // Spend 2 points into Strength (selected index 0 by default).
-        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
-        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         if let Screen::StatAllocation { stats, pool, .. } = &screen {
             assert_eq!(stats.strength, 10);
             assert_eq!(*pool, 2);
@@ -572,7 +621,7 @@ mod tests {
             panic!("expected StatAllocation");
         }
 
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::Game));
         assert_eq!(world.player.stats.strength, 10);
         assert_eq!(world.player.health.total().1, Health::from_strength(10).total().1);
@@ -587,8 +636,9 @@ mod tests {
         let config_path = tmp_path("binds-b");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-b");
+        let save_path = tmp_path("save-b");
 
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert_eq!(world.player.name, "Survivor");
     }
 
@@ -604,13 +654,14 @@ mod tests {
         let config_path = tmp_path("binds-c");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-c");
+        let save_path = tmp_path("save-c");
 
         // 'l' is East in the vi preset.
-        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::ExamineNpc { npc_index: 0, selected: 0 }));
 
         // Enter on the default selection (Talk) should reach World::step.
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::Game));
         assert_eq!(world.last_message.as_deref(), Some("\"Hey there.\" - Ally"));
     }
@@ -631,13 +682,14 @@ mod tests {
         let config_path = tmp_path("binds-g");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-g");
+        let save_path = tmp_path("save-g");
 
-        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::ExamineNpc { npc_index: 0, selected: 0 }));
 
         // Enter on the default selection (Attack, for a hostile) should
         // reach World::step and defeat it (1 HP left, 10 damage).
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::Game));
         assert_eq!(world.last_message.as_deref(), Some("You defeated the Zombie."));
         assert!(world.npcs.is_empty());
@@ -662,8 +714,9 @@ mod tests {
         let config_path = tmp_path("binds-h");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-h");
+        let save_path = tmp_path("save-h");
 
-        handle_key(KeyCode::Char('.'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('.'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(world.player.health.is_dead());
     }
 
@@ -676,8 +729,9 @@ mod tests {
         let config_path = tmp_path("binds-i");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-i");
+        let save_path = tmp_path("save-i");
 
-        let keep_running = handle_key(KeyCode::Char('x'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        let keep_running = handle_key(KeyCode::Char('x'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(!keep_running);
     }
 
@@ -691,8 +745,9 @@ mod tests {
         let config_path = tmp_path("binds-m");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-m");
+        let save_path = tmp_path("save-m");
 
-        handle_key(KeyCode::Char('V'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('V'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::View { mode: ui::ViewMode::Items, index: 0 }));
     }
 
@@ -706,8 +761,9 @@ mod tests {
         let config_path = tmp_path("binds-n");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-n");
+        let save_path = tmp_path("save-n");
 
-        handle_key(KeyCode::Char('V'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('V'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::View { mode: ui::ViewMode::Creatures, index: 0 }));
     }
 
@@ -722,15 +778,16 @@ mod tests {
         let config_path = tmp_path("binds-o");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-o");
+        let save_path = tmp_path("save-o");
 
         // Only one item, so Down shouldn't move past index 0.
-        handle_key(KeyCode::Down, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Down, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::View { mode: ui::ViewMode::Items, index: 0 }));
 
-        handle_key(KeyCode::Tab, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Tab, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::View { mode: ui::ViewMode::Creatures, index: 0 }));
 
-        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::Game));
     }
 
@@ -745,8 +802,9 @@ mod tests {
         let config_path = tmp_path("binds-d");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-d");
+        let save_path = tmp_path("save-d");
 
-        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('l'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::Examine { x: 6, y: 5 }));
     }
 
@@ -760,11 +818,12 @@ mod tests {
         let config_path = tmp_path("binds-e");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-e");
+        let save_path = tmp_path("save-e");
         let _ = std::fs::remove_file(&settings_path);
 
         assert_eq!(display.sidebar_order[0], SidebarSection::Health);
         assert_eq!(display.sidebar_order[1], SidebarSection::Hunger);
-        handle_key(KeyCode::Char('+'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('+'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert_eq!(display.sidebar_order[0], SidebarSection::Hunger);
         assert_eq!(display.sidebar_order[1], SidebarSection::Health);
         assert!(matches!(screen, Screen::SidebarOrder { selected: 0 }));
@@ -773,7 +832,7 @@ mod tests {
         assert_eq!(reloaded.sidebar_order[0], SidebarSection::Hunger);
 
         // '-' should lower it right back below Health.
-        handle_key(KeyCode::Char('-'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('-'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert_eq!(display.sidebar_order[0], SidebarSection::Health);
         assert_eq!(display.sidebar_order[1], SidebarSection::Hunger);
         assert!(matches!(screen, Screen::SidebarOrder { selected: 1 }));
@@ -790,23 +849,24 @@ mod tests {
         let config_path = tmp_path("binds-j");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-j");
+        let save_path = tmp_path("save-j");
         let _ = std::fs::remove_file(&settings_path);
 
         assert_eq!(display.sidebar_width_percent, 33, "defaults to real C:BN's own ~1/3-of-screen sidebar");
-        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert_eq!(display.sidebar_width_percent, 38);
-        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
-        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert_eq!(display.sidebar_width_percent, 28);
 
         // Clamp at the top.
         display.sidebar_width_percent = ui::MAX_SIDEBAR_PERCENT;
-        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert_eq!(display.sidebar_width_percent, ui::MAX_SIDEBAR_PERCENT);
 
         // Clamp at the bottom.
         display.sidebar_width_percent = ui::MIN_SIDEBAR_PERCENT;
-        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert_eq!(display.sidebar_width_percent, ui::MIN_SIDEBAR_PERCENT);
 
         let _ = std::fs::remove_file(&settings_path);
@@ -821,10 +881,11 @@ mod tests {
         let config_path = tmp_path("binds-k");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-k");
+        let save_path = tmp_path("save-k");
         let _ = std::fs::remove_file(&settings_path);
 
         assert!(display.limbs_two_rows);
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(!display.limbs_two_rows);
 
         let _ = std::fs::remove_file(&settings_path);
@@ -839,16 +900,17 @@ mod tests {
         let config_path = tmp_path("binds-l");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-l");
+        let save_path = tmp_path("save-l");
 
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::MovementSettings { selected: 0 }));
-        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::Settings { selected: 0 }));
 
-        handle_key(KeyCode::Down, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
-        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Down, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        handle_key(KeyCode::Enter, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::SidebarSettings { selected: 0 }));
-        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Esc, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::Settings { selected: 1 }));
     }
 
@@ -861,8 +923,83 @@ mod tests {
         let config_path = tmp_path("binds-f");
         let mut display = DisplaySettings::default();
         let settings_path = tmp_path("settings-f");
+        let save_path = tmp_path("save-f");
 
-        handle_key(KeyCode::Char('}'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
+        handle_key(KeyCode::Char('}'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         assert!(matches!(screen, Screen::SidebarOrder { selected: 0 }));
+    }
+
+    #[test]
+    fn pause_menu_direct_keys_bypass_arrow_navigation() {
+        let mut world = test_world();
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-p");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-p");
+        let save_path = tmp_path("save-p");
+        let _ = std::fs::remove_file(&save_path);
+
+        // 'R' resumes regardless of which item is currently selected.
+        let mut screen = Screen::Pause { selected: 3 };
+        handle_key(KeyCode::Char('R'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::Game));
+
+        // 's' opens Settings directly.
+        let mut screen = Screen::Pause { selected: 0 };
+        handle_key(KeyCode::Char('s'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::Settings { selected: 0 }));
+
+        // 'q' quits without writing a save file.
+        let mut screen = Screen::Pause { selected: 0 };
+        let keep_running = handle_key(KeyCode::Char('q'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(!keep_running, "'q' should quit");
+        assert!(!save_path.exists(), "plain quit should not leave a save behind");
+
+        let _ = std::fs::remove_file(&save_path);
+    }
+
+    #[test]
+    fn pause_menu_save_and_quit_writes_a_reloadable_save() {
+        let mut world = test_world();
+        world.player.name = "Runner".to_string();
+        world.turn = 42;
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-q");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-q");
+        let save_path = tmp_path("save-q");
+        let _ = std::fs::remove_file(&save_path);
+
+        let mut screen = Screen::Pause { selected: 0 };
+        let keep_running = handle_key(KeyCode::Char('S'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(!keep_running, "'S' should quit after saving");
+
+        let data = std::fs::read_to_string(&save_path).expect("Save and Quit should have written a file");
+        let save: scourge_core::SaveData = serde_json::from_str(&data).expect("save file should be valid JSON");
+        assert_eq!(save.player.name, "Runner");
+        assert_eq!(save.turn, 42);
+
+        let _ = std::fs::remove_file(&save_path);
+    }
+
+    #[test]
+    fn settings_category_direct_keys_open_the_matching_screen() {
+        let mut world = test_world();
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-r");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-r");
+        let save_path = tmp_path("save-r");
+
+        let mut screen = Screen::Settings { selected: 1 };
+        handle_key(KeyCode::Char('m'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::MovementSettings { selected: 0 }));
+
+        let mut screen = Screen::Settings { selected: 0 };
+        handle_key(KeyCode::Char('s'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::SidebarSettings { selected: 0 }));
     }
 }

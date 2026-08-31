@@ -1,6 +1,6 @@
 //! Core game state: entities, turn engine, stats. No I/O, no rendering, no networking.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Pos {
     pub x: i32,
     pub y: i32,
@@ -136,7 +136,7 @@ pub enum Action {
 /// whatever color representation it actually supports, at whatever
 /// richness it can (truecolor, 256-color, or the basic ANSI 16 as a last
 /// resort for things like a bare Linux tty console).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TileColor {
     Default,
     White,
@@ -152,7 +152,7 @@ pub enum TileColor {
 }
 
 /// A single terrain type. More kinds (rubble, water...) land here as they're needed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tile {
     Floor,
     /// Outdoor ground, distinct from indoor `Floor` (same glyph, different
@@ -246,7 +246,7 @@ impl Tile {
 }
 
 /// A grid of tiles. Generation itself lives in `scourge-world`; this is just the data.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Map {
     pub width: i32,
     pub height: i32,
@@ -475,7 +475,7 @@ fn bresenham_line(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
 /// What an item actually does, if anything. Deliberately minimal - real
 /// items (weight/volume/containers/weapons, matching DDA's actual model)
 /// are future work once there's a mod-data pipeline to define them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ItemKind {
     Generic,
     Food { hunger_restored: i32 },
@@ -486,7 +486,7 @@ pub enum ItemKind {
 /// default, overridable per item (`with_glyph`) once a specific item earns
 /// its own look, same "simple content first, detail per-item later"
 /// pattern as `Npc::with_glyph`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     pub name: String,
     pub kind: ItemKind,
@@ -518,7 +518,7 @@ impl Item {
 /// with no derived skills/combat math yet - only `strength` currently does
 /// anything (feeds `Health::from_strength`). The others are groundwork for
 /// when carry capacity, hit chance, etc. get built.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub strength: i32,
     pub dexterity: i32,
@@ -538,7 +538,7 @@ impl Default for Stats {
 /// hands/feet/eyes/mouth as separate parts - left out here since nothing
 /// yet needs that finer granularity, e.g. no called-shots or encumbrance
 /// system; easy to add later without disturbing this).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BodyPart {
     Head,
     Torso,
@@ -576,7 +576,7 @@ impl BodyPart {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartHealth {
     pub current: i32,
     pub max: i32,
@@ -597,7 +597,7 @@ impl PartHealth {
 /// sources or regeneration exist yet (nothing currently calls `damage` or
 /// `heal`), so every part just sits at max until combat or anything else
 /// is built to change it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Health {
     pub head: PartHealth,
     pub torso: PartHealth,
@@ -707,7 +707,7 @@ pub fn hp_bar(current: i32, max: i32) -> String {
 /// nothing yet trains or checks them (no combat/crafting/social systems
 /// exist), same "logic before the systems that use it" situation as
 /// hunger's threshold and health's damage sources.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Skill {
     Speech,
     Computer,
@@ -806,7 +806,7 @@ impl Skill {
 /// A survivor's skill levels, 0-10 like real DDA. Sparse - an untrained
 /// skill is just absent rather than stored as an explicit 0, since a fresh
 /// character starts with nearly all of them untrained.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Skills(std::collections::HashMap<Skill, u8>);
 
 impl Skills {
@@ -828,6 +828,7 @@ impl Skills {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Player {
     pub name: String,
     pub pos: Pos,
@@ -852,7 +853,7 @@ pub struct Player {
 /// system - `Friendly` is the only one anything acts on so far. `Hostile`
 /// exists now because enemy AI is the very next thing being built on top of
 /// this same `Npc` type, not because of any other planned use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Attitude {
     Friendly,
     Hostile,
@@ -862,6 +863,7 @@ pub enum Attitude {
 /// NPC-specific versions, since an NPC is mechanically just another
 /// creature on the map - the only new thing it needs is `attitude` to
 /// decide what its AI does each turn.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Npc {
     pub name: String,
     pub pos: Pos,
@@ -938,7 +940,57 @@ pub struct World {
     pub last_message: Option<String>,
 }
 
+/// A serializable snapshot of a `World` - `World` itself isn't directly
+/// (de)serializable because `ground_items` keys on a raw `(i32, i32)` tuple,
+/// which JSON has no notion of as an object key. Flattening it to a plain
+/// `Vec<(Pos, Item)>` here sidesteps that; `World::to_save`/`World::from_save`
+/// convert between the two.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SaveData {
+    pub map: Map,
+    pub player: Player,
+    pub npcs: Vec<Npc>,
+    pub turn: u64,
+    pub ground_items: Vec<(Pos, Item)>,
+    pub last_message: Option<String>,
+}
+
 impl World {
+    /// Save-and-quit: everything needed to resume exactly where the player
+    /// left off, at the granularity that already exists (no partial-turn
+    /// state to worry about since actions only ever complete a whole turn).
+    pub fn to_save(&self) -> SaveData {
+        let mut ground_items = Vec::new();
+        for (&(x, y), stack) in &self.ground_items {
+            for item in stack {
+                ground_items.push((Pos { x, y }, item.clone()));
+            }
+        }
+        SaveData {
+            map: self.map.clone(),
+            player: self.player.clone(),
+            npcs: self.npcs.clone(),
+            turn: self.turn,
+            ground_items,
+            last_message: self.last_message.clone(),
+        }
+    }
+
+    pub fn from_save(data: SaveData) -> Self {
+        let mut ground_items: std::collections::HashMap<(i32, i32), Vec<Item>> = std::collections::HashMap::new();
+        for (pos, item) in data.ground_items {
+            ground_items.entry((pos.x, pos.y)).or_default().push(item);
+        }
+        World {
+            map: data.map,
+            player: data.player,
+            npcs: data.npcs,
+            turn: data.turn,
+            ground_items,
+            last_message: data.last_message,
+        }
+    }
+
     pub fn new(map: Map) -> Self {
         let stats = Stats::default();
         let mut world = World {
@@ -1858,5 +1910,25 @@ mod tests {
         world.step(Action::Move(Direction::East));
         assert!(world.npcs.is_empty(), "defeated NPCs are removed from the world");
         assert_eq!(world.last_message.as_deref(), Some("You defeated the Zombie."));
+    }
+
+    #[test]
+    fn world_round_trips_through_save_data() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        world.player.name = "Runner".to_string();
+        world.turn = 7;
+        world.npcs.push(Npc::new("Ally", Pos { x: 3, y: 2 }, Attitude::Friendly));
+        world.place_item(1, 1, item("Rock"));
+        world.place_item(1, 1, item("Stick"));
+
+        let reloaded = World::from_save(world.to_save());
+        assert_eq!(reloaded.player.name, "Runner");
+        assert_eq!(reloaded.player.pos, Pos { x: 2, y: 2 });
+        assert_eq!(reloaded.turn, 7);
+        assert_eq!(reloaded.npcs.len(), 1);
+        assert_eq!(reloaded.npcs[0].name, "Ally");
+        assert_eq!(reloaded.items_at(1, 1), &[item("Rock"), item("Stick")], "ground items survive the tuple-key flattening");
     }
 }
