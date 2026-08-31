@@ -172,7 +172,14 @@ pub enum Tile {
     Window { open: bool, curtain_open: bool },
     /// Blocks both movement and sight, like real dense underbrush.
     BlueberryBush,
-    /// Blocks both movement and sight - a bigger obstacle than a bush.
+    /// Non-tree woody vegetation - denser than TallGrass, same "blocks
+    /// movement and sight" class as the bushes. DDA/BN's 's'.
+    Shrub,
+    /// A young tree - blocks movement and sight like a mature one, but
+    /// reads visually distinct (lighter green, lowercase 't') so a forest
+    /// isn't visually uniform. DDA/BN's 't'.
+    YoungTree,
+    /// A mature tree - the bigger obstacle. DDA/BN's 'T'.
     Tree,
 }
 
@@ -196,6 +203,8 @@ impl Tile {
                 | Tile::DoorClosed
                 | Tile::Window { curtain_open: false, .. }
                 | Tile::BlueberryBush
+                | Tile::Shrub
+                | Tile::YoungTree
                 | Tile::Tree
         )
     }
@@ -213,7 +222,9 @@ impl Tile {
             Tile::Window { open: true, .. } => '\'',
             Tile::Window { open: false, .. } => '"',
             Tile::BlueberryBush => '*',
-            Tile::Tree => 't',
+            Tile::Shrub => 's',
+            Tile::YoungTree => 't',
+            Tile::Tree => 'T',
         }
     }
 
@@ -227,6 +238,8 @@ impl Tile {
             Tile::DoorClosed | Tile::DoorOpen => TileColor::Brown,
             Tile::Window { .. } => TileColor::Cyan,
             Tile::BlueberryBush => TileColor::Blue,
+            Tile::Shrub => TileColor::DarkGreen,
+            Tile::YoungTree => TileColor::Green,
             Tile::Tree => TileColor::DarkGreen,
         }
     }
@@ -468,20 +481,32 @@ pub enum ItemKind {
     Food { hunger_restored: i32 },
 }
 
-/// A minimal carryable/ground item.
+/// A minimal carryable/ground item. `glyph`/`color` are what shows on the
+/// map when it's lying on the ground - `?` in a generic marker color by
+/// default, overridable per item (`with_glyph`) once a specific item earns
+/// its own look, same "simple content first, detail per-item later"
+/// pattern as `Npc::with_glyph`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     pub name: String,
     pub kind: ItemKind,
+    pub glyph: char,
+    pub color: TileColor,
 }
 
 impl Item {
     pub fn new(name: impl Into<String>) -> Self {
-        Item { name: name.into(), kind: ItemKind::Generic }
+        Item { name: name.into(), kind: ItemKind::Generic, glyph: '?', color: TileColor::Magenta }
     }
 
     pub fn food(name: impl Into<String>, hunger_restored: i32) -> Self {
-        Item { name: name.into(), kind: ItemKind::Food { hunger_restored } }
+        Item { name: name.into(), kind: ItemKind::Food { hunger_restored }, glyph: '?', color: TileColor::Magenta }
+    }
+
+    pub fn with_glyph(mut self, glyph: char, color: TileColor) -> Self {
+        self.glyph = glyph;
+        self.color = color;
+        self
     }
 
     pub fn is_food(&self) -> bool {
@@ -658,13 +683,23 @@ impl Health {
 /// the real formula (couldn't verify the exact pip-rounding rule from
 /// source), but the visual language matches: an idea of your condition,
 /// not a precise readout, unless you have that trait.
+/// Real BN's HP bar doesn't just drop straight from a full pip ('|') to an
+/// empty one (':') - a pip passes through a "worn" state ('\') first, so a
+/// part that's about to lose a pip reads as visually declining rather than
+/// jumping. Modeled as 10 half-steps spread across the 5 pips.
 pub fn hp_bar(current: i32, max: i32) -> String {
     if current <= 0 {
         return "-----".to_string();
     }
     let ratio = if max > 0 { (current as f64 / max as f64).clamp(0.0, 1.0) } else { 0.0 };
-    let filled = ((ratio * 5.0).round() as usize).clamp(1, 5);
-    format!("{}{}", "|".repeat(filled), ":".repeat(5 - filled))
+    let tenths = ((ratio * 10.0).round() as i32).clamp(1, 10);
+    (0..5)
+        .map(|i| match tenths - i * 2 {
+            slot if slot >= 2 => '|',
+            1 => '\\',
+            _ => ':',
+        })
+        .collect()
 }
 
 /// The 27 real DDA skills (a 28th, "weapon", is an internal contextual
@@ -1387,8 +1422,8 @@ mod tests {
     #[test]
     fn hp_bar_shows_an_idea_not_a_number() {
         assert_eq!(hp_bar(60, 60), "|||||");
-        assert_eq!(hp_bar(30, 60), "|||::", "half health rounds to 3 of 5 pips");
-        assert_eq!(hp_bar(1, 60), "|::::", "still shows at least one pip while alive");
+        assert_eq!(hp_bar(30, 60), "||\\::", "half health shows a worn pip before it fully drops");
+        assert_eq!(hp_bar(1, 60), "\\::::", "barely alive shows a sliver, not a full pip");
         assert_eq!(hp_bar(0, 60), "-----", "fully destroyed part");
     }
 

@@ -40,8 +40,10 @@ impl SidebarSection {
     }
 }
 
+/// Real C:BN's own sidebar takes up about a third of the screen - a nicer
+/// default than our old flat 25%, and the size it should default to here too.
 fn default_sidebar_width_percent() -> u16 {
-    25
+    33
 }
 
 fn default_true() -> bool {

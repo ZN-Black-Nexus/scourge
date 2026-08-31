@@ -792,12 +792,12 @@ mod tests {
         let settings_path = tmp_path("settings-j");
         let _ = std::fs::remove_file(&settings_path);
 
-        assert_eq!(display.sidebar_width_percent, 25);
+        assert_eq!(display.sidebar_width_percent, 33, "defaults to real C:BN's own ~1/3-of-screen sidebar");
         handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
-        assert_eq!(display.sidebar_width_percent, 30);
+        assert_eq!(display.sidebar_width_percent, 38);
         handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
         handle_key(KeyCode::Left, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible);
-        assert_eq!(display.sidebar_width_percent, 20);
+        assert_eq!(display.sidebar_width_percent, 28);
 
         // Clamp at the top.
         display.sidebar_width_percent = ui::MAX_SIDEBAR_PERCENT;

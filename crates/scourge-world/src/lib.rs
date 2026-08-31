@@ -179,12 +179,24 @@ fn scatter_vegetation(map: &mut Map, rng: &mut impl Rng) {
         }
     }
 
+    let shrub_count = (map.width * map.height) / 250;
+    for _ in 0..shrub_count {
+        let x = rng.gen_range(1..map.width - 1);
+        let y = rng.gen_range(1..map.height - 1);
+        if is_open_ground(map.tile(x, y)) {
+            map.set(x, y, Tile::Shrub);
+        }
+    }
+
+    // A mix of young and mature trees, rather than a forest of identical
+    // trunks - young ones roughly a third as common as mature ones.
     let tree_count = (map.width * map.height) / 180;
     for _ in 0..tree_count {
         let x = rng.gen_range(1..map.width - 1);
         let y = rng.gen_range(1..map.height - 1);
         if is_open_ground(map.tile(x, y)) {
-            map.set(x, y, Tile::Tree);
+            let tile = if rng.gen_bool(0.3) { Tile::YoungTree } else { Tile::Tree };
+            map.set(x, y, tile);
         }
     }
 }
@@ -201,7 +213,8 @@ fn scatter_items(map: &Map, rng: &mut impl Rng) -> Vec<(Pos, Item)> {
             let item = if rng.gen_bool(0.4) {
                 Item::food("Blueberries", 20)
             } else {
-                Item::new("Rock")
+                // A gray '*' reads more like a rock than a generic '?'.
+                Item::new("Rock").with_glyph('*', scourge_core::TileColor::Gray)
             };
             items.push((Pos { x, y }, item));
         }

@@ -256,12 +256,6 @@ fn ratatui_color(c: TileColor) -> Color {
     }
 }
 
-/// The marker shown for an item sitting on the ground - distinct from any
-/// terrain color so it stands out at a glance.
-fn item_marker_color() -> Color {
-    ratatui_color(TileColor::Magenta)
-}
-
 /// The player glyph's color - white, like real DDA's `@`.
 fn player_color() -> Color {
     ratatui_color(TileColor::White)
@@ -287,21 +281,25 @@ fn cell(world: &World, explored: &Explored, visible: &VisibleSet, x: i32, y: i32
     // A ground item sitting on a tile needs its own marker - otherwise it's
     // invisible on the map, since the cell would just show plain terrain and
     // you'd only ever find out something's there by looking (x) at the exact
-    // tile. `?` overrides the terrain glyph but not its brightness tier.
-    let has_item = !world.items_at(x, y).is_empty();
+    // tile. Each item can carry its own glyph/color (e.g. a rock's gray '*');
+    // a plain '?' in the generic marker color is the default for anything
+    // that hasn't earned a specific look yet. The topmost item (the one
+    // picked up first) is what's shown, matching `items_at`'s pop-from-end
+    // pickup order.
+    let top_item = world.items_at(x, y).last();
     if visible.is_visible(x, y) {
         let (dx, dy) = (x - world.player.pos.x, y - world.player.pos.y);
         let near = dx * dx + dy * dy <= NEAR_RADIUS * NEAR_RADIUS;
-        let style = if has_item {
-            Style::default().fg(item_marker_color())
+        let style = if let Some(item) = top_item {
+            Style::default().fg(ratatui_color(item.color))
         } else {
             Style::default().fg(ratatui_color(world.map.color_at(x, y)))
         };
         let style = if near { style } else { style.add_modifier(Modifier::DIM) };
-        let glyph = if has_item { '?' } else { world.map.glyph_at(x, y) };
+        let glyph = top_item.map_or_else(|| world.map.glyph_at(x, y), |item| item.glyph);
         (glyph, style)
     } else if explored.is_seen(x, y) {
-        let glyph = if has_item { '?' } else { world.map.glyph_at(x, y) };
+        let glyph = top_item.map_or_else(|| world.map.glyph_at(x, y), |item| item.glyph);
         (glyph, Style::default().fg(Color::DarkGray))
     } else {
         (' ', Style::default())
@@ -488,10 +486,11 @@ fn npc_in_direction(world: &World, visible: &VisibleSet, dir: Direction) -> Opti
 }
 
 /// Every distinct visible NPC (grouped by name+glyph, e.g. several zombies
-/// collapse into one "Z x3 Zombie" line rather than one line per
-/// occurrence) - the glyph keeps its own color (identity), the name is
-/// colored by attitude (a fast danger read: red hostile, green friendly).
-/// Sorted by name for a stable, non-jittery order across frames.
+/// collapse into one "Z 3 Zombie" line rather than one line per
+/// occurrence - real BN's own convention is a bare count, no "x") - the
+/// glyph keeps its own color (identity), the name is colored by attitude
+/// (a fast danger read: red hostile, green friendly). Sorted by name for a
+/// stable, non-jittery order across frames.
 fn compass_roster(world: &World, visible: &VisibleSet) -> Vec<Line<'static>> {
     let mut groups: std::collections::HashMap<(&str, char), (TileColor, Attitude, u32)> = std::collections::HashMap::new();
     for npc in &world.npcs {
@@ -506,7 +505,7 @@ fn compass_roster(world: &World, visible: &VisibleSet) -> Vec<Line<'static>> {
     groups
         .into_iter()
         .map(|((name, glyph), (color, attitude, count))| {
-            let count_part = if count > 1 { format!("x{count} ") } else { String::new() };
+            let count_part = if count > 1 { format!("{count} ") } else { String::new() };
             Line::from(vec![
                 Span::styled(glyph.to_string(), Style::default().fg(ratatui_color(color))),
                 Span::raw(format!(" {count_part}")),
@@ -526,8 +525,10 @@ fn compass_roster(world: &World, visible: &VisibleSet) -> Vec<Line<'static>> {
 fn compass_lines(world: &World, visible: &VisibleSet, abbreviate_cardinals: bool) -> Vec<Line<'static>> {
     let cell = |dir: Direction| -> Vec<Span<'static>> {
         let label = compass_label(dir, abbreviate_cardinals);
-        let mut spans = vec![Span::raw(format!("{label}: "))];
-        let mut used = label.len() + 2;
+        // No space between the ':' and the glyph - real BN's own convention
+        // ("N:Z", not "N: Z").
+        let mut spans = vec![Span::raw(format!("{label}:"))];
+        let mut used = label.len() + 1;
         match npc_in_direction(world, visible, dir) {
             Some((glyph, color)) => spans.push(Span::styled(glyph.to_string(), Style::default().fg(color))),
             None => spans.push(Span::raw(" ")),
@@ -808,6 +809,8 @@ fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i3
             Some(Tile::Window { open: false, curtain_open: true }) => "a window",
             Some(Tile::Window { open: false, curtain_open: false }) => "a curtained window",
             Some(Tile::BlueberryBush) => "a blueberry bush",
+            Some(Tile::Shrub) => "a shrub",
+            Some(Tile::YoungTree) => "a young tree",
             Some(Tile::Tree) => "a tree",
             None => "unknown",
         }
@@ -842,10 +845,9 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x:
                 if world_x == world.player.pos.x && world_y == world.player.pos.y {
                     ('@', Style::default().fg(player_color()))
                 } else if explored.is_seen(world_x, world_y) {
-                    if world.items_at(world_x, world_y).is_empty() {
-                        (world.map.glyph_at(world_x, world_y), Style::default().fg(Color::DarkGray))
-                    } else {
-                        ('?', Style::default().fg(item_marker_color()))
+                    match world.items_at(world_x, world_y).last() {
+                        Some(item) => (item.glyph, Style::default().fg(ratatui_color(item.color))),
+                        None => (world.map.glyph_at(world_x, world_y), Style::default().fg(Color::DarkGray)),
                     }
                 } else {
                     (' ', Style::default())
@@ -1351,7 +1353,7 @@ mod tests {
         let roster = compass_roster(&world, &visible);
         assert_eq!(roster.len(), 1, "all three zombies collapse into one grouped line");
         let text = line_text(&roster[0]);
-        assert!(text.contains("Z x3 Zombie"), "expected a glyph + count + name grouping, got: {text:?}");
+        assert!(text.contains("Z 3 Zombie"), "expected a glyph + count + name grouping, got: {text:?}");
     }
 
     #[test]
