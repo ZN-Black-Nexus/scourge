@@ -80,7 +80,12 @@ pub enum Action {
     /// sash, or (if the sash is already closed) closes its curtain.
     Close,
     Quit,
-    /// Picks up the topmost item on the player's current tile, if any.
+    /// Picks up the topmost item at the player's tile or an adjacent one,
+    /// if any (see `World::pickup_target` for exactly where). The render
+    /// layer checks that target first and redirects to the corpse loot
+    /// screen instead of sending this when it's a corpse - so in normal
+    /// play this never actually fires on one, but `step` doesn't assume
+    /// that and just picks it up whole if it ever does.
     PickUp,
     /// UI-only: opens the wield-selection screen. Never actually reaches
     /// `World::step` in normal play (the render layer intercepts it), but
@@ -130,6 +135,15 @@ pub enum Action {
     /// matching "simple content first" - that's a real DDA-depth addition
     /// for later, once combat existing at all is confirmed to work.
     Attack(usize),
+    /// Takes one item out of a corpse's loot at this ground position -
+    /// `item_index` into that corpse's own loot list, not the player's
+    /// inventory. Reached only through the corpse's own loot screen, not
+    /// plain pickup (see `World::pickup_target`).
+    TakeCorpseLoot { x: i32, y: i32, item_index: usize },
+    /// Picks up the corpse itself (not just what's inside it) - a
+    /// deliberate choice from the loot screen, not what plain `PickUp`
+    /// does when a corpse is what's there.
+    TakeCorpse { x: i32, y: i32 },
 }
 
 /// Backend-agnostic terrain color name. `scourge-core` has no rendering
@@ -476,12 +490,16 @@ fn bresenham_line(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
 }
 
 /// What an item actually does, if anything. Deliberately minimal - real
-/// items (weight/volume/containers/weapons, matching DDA's actual model)
-/// are future work once there's a mod-data pipeline to define them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// items (weight/volume/weapons, matching DDA's actual model) are future
+/// work once there's a mod-data pipeline to define them. `Corpse` is the
+/// one exception with real depth already: a corpse is a container with
+/// (possibly empty) loot inside, not something you just carry directly -
+/// examining/picking one up opens that loot instead of grabbing it whole.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ItemKind {
     Generic,
     Food { hunger_restored: i32 },
+    Corpse { loot: Vec<Item> },
 }
 
 /// A minimal carryable/ground item. `glyph`/`color` are what shows on the
@@ -526,6 +544,30 @@ impl Item {
     pub fn with_melee_damage(mut self, damage: i32) -> Self {
         self.melee_damage = Some(damage);
         self
+    }
+
+    /// A corpse - a lootable container, not a plain carryable item. `loot`
+    /// is typically whatever the source creature's own `Npc.inventory`
+    /// held at time of death (see `World::attack_npc`).
+    pub fn corpse(name: impl Into<String>, color: TileColor, loot: Vec<Item>) -> Self {
+        let mut item = Item::new(name);
+        item.kind = ItemKind::Corpse { loot };
+        item.glyph = '%';
+        item.color = color;
+        item
+    }
+
+    pub fn is_corpse(&self) -> bool {
+        matches!(self.kind, ItemKind::Corpse { .. })
+    }
+
+    /// Empty for anything that isn't a corpse - never a container-vs-not
+    /// distinction the caller has to check separately first.
+    pub fn corpse_loot(&self) -> &[Item] {
+        match &self.kind {
+            ItemKind::Corpse { loot } => loot,
+            _ => &[],
+        }
     }
 
     pub fn is_food(&self) -> bool {
@@ -1044,6 +1086,22 @@ impl World {
         self.ground_items.get(&(x, y)).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Where `Action::PickUp` would actually act, if anywhere - the
+    /// player's own tile first, then the 8 adjacent ones, same search
+    /// order `PickUp` itself uses. Exposed so the render layer can decide
+    /// *how* to handle what's there (a corpse needs its own loot screen,
+    /// not an instant pickup) before ever calling `step`.
+    pub fn pickup_target(&self) -> Option<Pos> {
+        std::iter::once((0, 0)).chain(ADJACENT_OFFSETS).find_map(|(dx, dy)| {
+            let (x, y) = (self.player.pos.x + dx, self.player.pos.y + dy);
+            if self.items_at(x, y).is_empty() {
+                None
+            } else {
+                Some(Pos { x, y })
+            }
+        })
+    }
+
     /// Every ground item currently within `visible`, nearest to the player
     /// first (then by name, for a stable order when several tie on
     /// distance) - the 'V' view screen's item list.
@@ -1236,8 +1294,9 @@ impl World {
                 }
             }
             Action::OpenEatMenu => {}
-            Action::Eat(index) => match self.player.inventory.get(index).map(|i| i.kind) {
+            Action::Eat(index) => match self.player.inventory.get(index).map(|i| &i.kind) {
                 Some(ItemKind::Food { hunger_restored }) => {
+                    let hunger_restored = *hunger_restored;
                     let name = self.player.inventory[index].name.clone();
                     self.player.hunger = (self.player.hunger - hunger_restored).max(0);
                     self.player.inventory.remove(index);
@@ -1275,6 +1334,38 @@ impl World {
                     self.attack_npc(index);
                 } else {
                     self.last_message = Some("There's nothing there to attack.".to_string());
+                }
+            }
+            Action::TakeCorpseLoot { x, y, item_index } => {
+                let taken = self.ground_items.get_mut(&(x, y)).and_then(|stack| {
+                    stack.iter_mut().find_map(|item| match &mut item.kind {
+                        ItemKind::Corpse { loot } if item_index < loot.len() => Some(loot.remove(item_index)),
+                        _ => None,
+                    })
+                });
+                match taken {
+                    Some(item) => {
+                        self.last_message = Some(format!("Took {} from the corpse.", item.name));
+                        self.player.inventory.push(item);
+                        self.tick();
+                    }
+                    None => self.last_message = Some("Nothing there to take.".to_string()),
+                }
+            }
+            Action::TakeCorpse { x, y } => {
+                let key = (x, y);
+                let taken =
+                    self.ground_items.get_mut(&key).and_then(|stack| stack.iter().position(Item::is_corpse).map(|i| stack.remove(i)));
+                match taken {
+                    Some(item) => {
+                        self.last_message = Some(format!("Picked up {}.", item.name));
+                        self.player.inventory.push(item);
+                        if self.ground_items.get(&key).is_some_and(Vec::is_empty) {
+                            self.ground_items.remove(&key);
+                        }
+                        self.tick();
+                    }
+                    None => self.last_message = Some("No corpse there.".to_string()),
                 }
             }
         }
@@ -1372,7 +1463,8 @@ impl World {
         let lethal = self.npcs[index].health.damage(BodyPart::Torso, damage);
         if lethal {
             let npc = self.npcs.remove(index);
-            self.place_item(npc.pos.x, npc.pos.y, Item::new(format!("{name} corpse")).with_glyph('%', npc.color));
+            let corpse = Item::corpse(format!("{name} corpse"), npc.color, npc.inventory);
+            self.place_item(npc.pos.x, npc.pos.y, corpse);
             self.last_message = Some(format!("You defeated the {name}."));
         } else {
             self.last_message = Some(format!("You hit the {name} for {damage} damage."));
@@ -1948,6 +2040,62 @@ mod tests {
         assert_eq!(corpse.name, "Zombie corpse");
         assert_eq!(corpse.glyph, '%');
         assert_eq!(corpse.color, TileColor::Red, "corpse matches the zombie's own color, not a fixed one");
+        assert!(corpse.is_corpse());
+        assert!(corpse.corpse_loot().is_empty(), "this zombie had nothing in its inventory to drop");
+    }
+
+    #[test]
+    fn a_dead_npcs_own_inventory_becomes_its_corpse_loot() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        let mut zombie = Npc::new("Zombie", Pos { x: 3, y: 2 }, Attitude::Hostile);
+        zombie.health.damage(BodyPart::Torso, 55);
+        zombie.inventory.push(item("Rock"));
+        world.npcs.push(zombie);
+
+        world.step(Action::Move(Direction::East));
+        let corpse = &world.items_at(3, 2)[0];
+        assert_eq!(corpse.corpse_loot(), &[item("Rock")]);
+    }
+
+    #[test]
+    fn pickup_target_checks_own_tile_then_adjacent_ones() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.player.pos = Pos { x: 2, y: 2 };
+        assert_eq!(world.pickup_target(), None, "nothing anywhere nearby");
+
+        world.place_item(3, 2, item("Rock"));
+        assert_eq!(world.pickup_target(), Some(Pos { x: 3, y: 2 }), "falls back to an adjacent tile");
+
+        world.place_item(2, 2, item("Stick"));
+        assert_eq!(world.pickup_target(), Some(Pos { x: 2, y: 2 }), "the player's own tile takes priority");
+    }
+
+    #[test]
+    fn taking_an_item_from_a_corpses_loot_moves_only_that_item() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.place_item(2, 2, Item::corpse("Zombie corpse", TileColor::Gray, vec![item("Rock"), item("Stick")]));
+
+        world.step(Action::TakeCorpseLoot { x: 2, y: 2, item_index: 0 });
+        assert_eq!(world.player.inventory, vec![item("Rock")]);
+        assert_eq!(world.items_at(2, 2)[0].corpse_loot(), &[item("Stick")], "only the taken item leaves the corpse");
+        assert_eq!(world.last_message.as_deref(), Some("Took Rock from the corpse."));
+        assert_eq!(world.turn, 1, "taking loot still costs a turn");
+    }
+
+    #[test]
+    fn taking_the_whole_corpse_removes_it_from_the_ground() {
+        let map = Map::new(5, 5, Tile::Floor);
+        let mut world = World::new(map);
+        world.place_item(2, 2, Item::corpse("Zombie corpse", TileColor::Gray, vec![item("Rock")]));
+
+        world.step(Action::TakeCorpse { x: 2, y: 2 });
+        assert_eq!(world.player.inventory.len(), 1);
+        assert!(world.player.inventory[0].is_corpse());
+        assert!(world.items_at(2, 2).is_empty(), "the corpse (loot and all) is gone from the ground");
     }
 
     #[test]

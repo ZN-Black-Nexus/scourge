@@ -32,7 +32,7 @@ pub const SIDEBAR_WIDTH_STEP: u16 = 5;
 const MIN_SIDEBAR_COLUMNS: u16 = 18;
 
 /// Pure so it's directly unit-testable without a real terminal.
-fn sidebar_width(total_width: u16, percent: u16) -> u16 {
+pub fn sidebar_width(total_width: u16, percent: u16) -> u16 {
     let percent = percent.clamp(MIN_SIDEBAR_PERCENT, MAX_SIDEBAR_PERCENT);
     let raw = (total_width as u32 * percent as u32) / 100;
     (raw as u16).max(MIN_SIDEBAR_COLUMNS.min(total_width))
@@ -52,10 +52,17 @@ pub(crate) const SIGHT_RADIUS: i32 = 60;
 /// which reads as flatter/less natural than DDA's real vision.
 const NEAR_RADIUS: i32 = 20;
 
-pub const PAUSE_ITEMS: [&str; 4] = ["Resume", "Settings", "Save and Quit", "Quit"];
+/// (key, label) pairs rather than plain labels - "Settings" and "Save and
+/// Quit" both start with the letter S, so highlighting a label's own
+/// leading character (the old approach) couldn't tell them apart at a
+/// glance even though the actual keys (lowercase 's' vs. uppercase 'S')
+/// already were unambiguous. Showing the real bound key explicitly, in
+/// its real case, fixes that without lowercasing any label - a menu item
+/// stays properly capitalized either way.
+pub const PAUSE_ITEMS: [(char, &str); 4] = [('R', "Resume"), ('s', "Settings"), ('S', "Save and Quit"), ('q', "Quit")];
 /// Settings is a category picker, not one long flat list - each category
 /// opens its own screen with its own items.
-pub const SETTINGS_CATEGORIES: [&str; 2] = ["Movement", "Sidebar"];
+pub const SETTINGS_CATEGORIES: [(char, &str); 2] = [('m', "Movement"), ('s', "Sidebar")];
 pub const MOVEMENT_SETTINGS_ITEM_COUNT: usize = 3;
 /// The Sidebar Settings list has dynamic items (current side, width
 /// percent, compass cardinal style, limb layout), so its content is built
@@ -93,6 +100,13 @@ pub enum Screen {
     /// deliberately just these two for now, since nothing else (combat,
     /// trading, real dialogue) exists yet to hang further options off of.
     ExamineNpc { npc_index: usize, selected: usize },
+    /// A corpse at this ground position - reached by `g` (PickUp) or
+    /// examining a tile whose top item is a corpse, instead of either one
+    /// just grabbing it whole. A corpse is a loot container: lettered
+    /// items are its own inner loot (`Action::TakeCorpseLoot`), '-' takes
+    /// the corpse itself (`Action::TakeCorpse`) for the player who
+    /// deliberately wants to carry/wield the whole thing.
+    CorpseLoot { x: i32, y: i32 },
     /// Free-look cursor: uses your character's real current sight (not
     /// memory-only like the map screen), lets you inspect anything within
     /// it even off the normal viewport, without moving or costing a turn.
@@ -152,7 +166,7 @@ pub fn draw(
             draw_look(frame, world, display, explored, visible, *cursor_x, *cursor_y)
         }
         Screen::View { mode, index } => draw_view(frame, world, display, explored, visible, *mode, *index),
-        Screen::Map { cam_x, cam_y, zoom } => draw_map_screen(frame, world, explored, *cam_x, *cam_y, *zoom),
+        Screen::Map { cam_x, cam_y, zoom } => draw_map_screen(frame, world, display, visible, explored, *cam_x, *cam_y, *zoom),
         Screen::NameEntry { name } => draw_name_entry(frame, name),
         Screen::StatAllocation { stats, pool, selected } => draw_stat_allocation(frame, *stats, *pool, *selected),
         _ => draw_game(frame, world, display, camera, explored, visible),
@@ -172,6 +186,7 @@ pub fn draw(
         Screen::ExamineDirection => draw_examine_direction(frame),
         Screen::Examine { x, y } => draw_examine(frame, world, explored, visible, *x, *y),
         Screen::ExamineNpc { npc_index, selected } => draw_examine_npc(frame, world, *npc_index, *selected),
+        Screen::CorpseLoot { x, y } => draw_corpse_loot(frame, world, *x, *y),
         Screen::Pause { selected } => draw_menu(frame, "Paused", &PAUSE_ITEMS, *selected),
         Screen::Settings { selected } => draw_menu(frame, "Settings", &SETTINGS_CATEGORIES, *selected),
         Screen::MovementSettings { selected } => draw_movement_settings(frame, *selected),
@@ -369,7 +384,7 @@ fn draw_game(
         .collect();
     frame.render_widget(Paragraph::new(lines), map_area);
 
-    draw_sidebar(frame, world, display, visible, sidebar_area);
+    draw_sidebar(frame, world, display, visible, sidebar_area, DEFAULT_SIDEBAR_FOOTER);
 }
 
 /// One HP line, e.g. "Head  |||::" by default, or "Head   45/60" with the
@@ -589,7 +604,13 @@ fn section_lines(section: SidebarSection, world: &World, inner_width: u16, limbs
     }
 }
 
-fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, visible: &VisibleSet, area: Rect) {
+/// The default footer every normal-play screen shares - the Map screen
+/// (see `draw_map_screen`) passes its own instead, since real BN's own
+/// overview screen keeps the sidebar around for its hints/info rather
+/// than a separate bottom bar.
+const DEFAULT_SIDEBAR_FOOTER: &str = "? help  @ skills  } layout";
+
+fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, visible: &VisibleSet, area: Rect, footer: &str) {
     let mut lines = vec![Line::raw(format!("{}  ({})", format_clock(world.turn), world.player.name))];
     if let Some(message) = &world.last_message {
         lines.push(Line::styled(message.clone(), Style::default().add_modifier(Modifier::ITALIC)));
@@ -606,7 +627,7 @@ fn draw_sidebar(frame: &mut Frame, world: &World, display: &DisplaySettings, vis
         }
         lines.push(Line::raw(""));
     }
-    lines.push(Line::raw("? help  @ skills  } layout"));
+    lines.push(Line::raw(footer.to_string()));
 
     let border = if display.sidebar_on_left { Borders::RIGHT } else { Borders::LEFT };
     let block = Block::default().title("Scourge").borders(border);
@@ -676,7 +697,7 @@ fn draw_look(
         Rect::new(map_area.x, map_area.y + map_height, map_area.width, 1),
     );
 
-    draw_sidebar(frame, world, display, visible, sidebar_area);
+    draw_sidebar(frame, world, display, visible, sidebar_area, DEFAULT_SIDEBAR_FOOTER);
 }
 
 /// Shift+V: no manual cursor - everything currently visible is already
@@ -843,10 +864,45 @@ fn describe_tile(world: &World, explored: &Explored, visible: &VisibleSet, x: i3
 /// for now, matching the map's current small, fixed size.
 pub const MAP_ZOOM_FACTORS: [i32; 2] = [1, 4];
 
-fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x: i32, cam_y: i32, zoom: usize) {
-    let area = frame.area();
-    let map_height = area.height.saturating_sub(1);
-    let (viewport_w, viewport_h) = (area.width as i32, map_height as i32);
+/// Keeps the same world point centered in the viewport across a zoom
+/// change. Without this, toggling zoom visibly shifts what's on screen:
+/// `cam_x`/`cam_y` are the viewport's top-left world tile, and zooming
+/// out only grows the view's bottom-right extent, so a fixed top-left
+/// corner means the point you were just looking at jumps toward the
+/// corner instead of staying put. Pure and independent of the real
+/// terminal so it's directly unit-testable.
+pub fn recenter_for_zoom(
+    cam_x: i32,
+    cam_y: i32,
+    old_factor: i32,
+    new_factor: i32,
+    viewport_w: i32,
+    viewport_h: i32,
+    map_w: i32,
+    map_h: i32,
+) -> (i32, i32) {
+    let center_x = cam_x + (viewport_w * old_factor) / 2;
+    let center_y = cam_y + (viewport_h * old_factor) / 2;
+    let new_cam_x = (center_x - (viewport_w * new_factor) / 2).clamp(0, (map_w - viewport_w * new_factor).max(0));
+    let new_cam_y = (center_y - (viewport_h * new_factor) / 2).clamp(0, (map_h - viewport_h * new_factor).max(0));
+    (new_cam_x, new_cam_y)
+}
+
+/// Birds-eye map screen - keeps the normal sidebar around (real BN's own
+/// convention) for hints/info instead of a separate bottom bar taking up
+/// map space, matching Look/View's own layout via `map_and_sidebar_areas`.
+fn draw_map_screen(
+    frame: &mut Frame,
+    world: &World,
+    display: &DisplaySettings,
+    visible: &VisibleSet,
+    explored: &Explored,
+    cam_x: i32,
+    cam_y: i32,
+    zoom: usize,
+) {
+    let (map_area, sidebar_area) = map_and_sidebar_areas(frame.area(), display);
+    let (viewport_w, viewport_h) = (map_area.width as i32, map_area.height as i32);
     let factor = MAP_ZOOM_FACTORS[zoom];
 
     let lines: Vec<Line> = (0..viewport_h)
@@ -875,29 +931,53 @@ fn draw_map_screen(frame: &mut Frame, world: &World, explored: &Explored, cam_x:
             }))
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(lines),
-        Rect::new(0, 0, area.width, map_height),
-    );
+    frame.render_widget(Paragraph::new(lines), map_area);
 
-    let hint = format!("Map ({}x zoom, z to toggle) - move to look around, Esc to return", factor);
-    frame.render_widget(Paragraph::new(hint), Rect::new(0, map_height, area.width, 1));
+    let footer = format!("Map ({factor}x zoom)  z: zoom  Esc: return");
+    draw_sidebar(frame, world, display, visible, sidebar_area, &footer);
 }
 
 /// 'i': a DDA-style lettered item list. Minimal first pass - no weight,
 /// volume, categories, or containers yet (nothing to compute those from -
 /// items are just names right now); just enough to see what you're
 /// carrying, matching the look DDA's inventory screen is going for.
+/// Groups items that compare equal (same name/kind/glyph/color/melee_
+/// damage) into one display line with a count, e.g. "3 Rock" instead of
+/// three separate "Rock" lines - matches real DDA's own inventory look.
+/// Each group keeps the *first* original index it covers rather than
+/// renumbering sequentially, so a letter-select screen (which maps a
+/// pressed letter straight back to that real index - see
+/// `inventory_letters`) still acts on one concrete slot with no extra
+/// indirection needed. `O(n^2)` in the input length, which is fine for
+/// inventory/loot-sized lists.
+fn group_items<'a>(items: impl Iterator<Item = (usize, &'a scourge_core::Item)>) -> Vec<(usize, usize, &'a scourge_core::Item)> {
+    let mut groups: Vec<(usize, usize, &scourge_core::Item)> = Vec::new();
+    for (index, item) in items {
+        match groups.iter_mut().find(|(_, _, existing)| *existing == item) {
+            Some(group) => group.1 += 1,
+            None => groups.push((index, 1, item)),
+        }
+    }
+    groups
+}
+
+fn item_line_label(letter: char, count: usize, name: &str) -> String {
+    if count > 1 {
+        format!("{letter} - {count} {name}")
+    } else {
+        format!("{letter} - {name}")
+    }
+}
+
 fn inventory_letters(inventory: &[scourge_core::Item]) -> Vec<ListItem<'static>> {
     if inventory.is_empty() {
         return vec![ListItem::new("(nothing carried)")];
     }
-    inventory
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let letter = (b'a' + (i as u8 % 26)) as char;
-            ListItem::new(format!("{letter} - {}", item.name))
+    group_items(inventory.iter().enumerate())
+        .into_iter()
+        .map(|(index, count, item)| {
+            let letter = (b'a' + (index as u8 % 26)) as char;
+            ListItem::new(item_line_label(letter, count, &item.name))
         })
         .collect()
 }
@@ -947,6 +1027,33 @@ fn draw_wield_select(frame: &mut Frame, world: &World) {
     frame.render_widget(list, popup);
 }
 
+/// A corpse's own loot - same lettered-list convention as
+/// `draw_wield_select`/`draw_drop_select`, with '-' standing in for
+/// "the whole item" the way it does for wielding empty hands there, here
+/// meaning "take the corpse itself" instead of just what's inside it.
+fn draw_corpse_loot(frame: &mut Frame, world: &World, x: i32, y: i32) {
+    let corpse = world.items_at(x, y).iter().find(|item| item.is_corpse());
+    let name = corpse.map(|c| c.name.as_str()).unwrap_or("corpse");
+    let title = format!("{name} - letter to take, - for the whole corpse, Esc to cancel");
+    let loot = corpse.map(scourge_core::Item::corpse_loot).unwrap_or(&[]);
+    let mut list_items = if loot.is_empty() {
+        vec![ListItem::new("(nothing inside)")]
+    } else {
+        group_items(loot.iter().enumerate())
+            .into_iter()
+            .map(|(index, count, item)| {
+                let letter = (b'a' + (index as u8 % 26)) as char;
+                ListItem::new(item_line_label(letter, count, &item.name))
+            })
+            .collect()
+    };
+    list_items.push(ListItem::new("- - Take the whole corpse"));
+    let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
+    let popup = centered_rect(70, 70, frame.area());
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
 fn draw_drop_select(frame: &mut Frame, world: &World) {
     let popup = centered_rect(70, 70, frame.area());
     let title = "Drop what? (letter to pick, Esc to cancel)";
@@ -959,14 +1066,15 @@ fn draw_drop_select(frame: &mut Frame, world: &World) {
 /// Only lists food - letters still correspond to the item's real inventory
 /// index (not renumbered), so pressing one maps back to the right slot.
 fn eat_letters(inventory: &[scourge_core::Item]) -> Vec<ListItem<'static>> {
-    let food: Vec<_> = inventory.iter().enumerate().filter(|(_, item)| item.is_food()).collect();
-    if food.is_empty() {
+    let groups = group_items(inventory.iter().enumerate().filter(|(_, item)| item.is_food()));
+    if groups.is_empty() {
         return vec![ListItem::new("(nothing edible carried)")];
     }
-    food.into_iter()
-        .map(|(i, item)| {
-            let letter = (b'a' + (i as u8 % 26)) as char;
-            ListItem::new(format!("{letter} - {}", item.name))
+    groups
+        .into_iter()
+        .map(|(index, count, item)| {
+            let letter = (b'a' + (index as u8 % 26)) as char;
+            ListItem::new(item_line_label(letter, count, &item.name))
         })
         .collect()
 }
@@ -1041,21 +1149,24 @@ fn draw_examine_npc(frame: &mut Frame, world: &World, npc_index: usize, selected
 /// via `draw_menu` (Pause, Settings) binds its own first letter as a
 /// direct key, so this always points at a real shortcut, never just a
 /// coincidental first letter.
-fn hotkey_line(label: &str, selected: bool) -> Line<'static> {
+/// Shows the actual bound key in brackets, in its real case, ahead of the
+/// (untouched, normally-capitalized) label - `key` white, the label gray.
+/// Deriving the hotkey from the label's own leading letter used to work
+/// until two items shared one (Settings/Save and Quit both start with
+/// 'S') - showing the real key explicitly, case and all, disambiguates
+/// that without ever lowercasing a label to fake it.
+fn hotkey_line(key: char, label: &str, selected: bool) -> Line<'static> {
     let modifier = if selected { Modifier::REVERSED } else { Modifier::empty() };
-    let mut chars = label.chars();
-    let first = chars.next().map(|c| c.to_string()).unwrap_or_default();
-    let rest: String = chars.collect();
     Line::from(vec![
-        Span::styled(first, Style::default().fg(Color::White).add_modifier(modifier)),
-        Span::styled(rest, Style::default().fg(Color::Gray).add_modifier(modifier)),
+        Span::styled(format!("[{key}] "), Style::default().fg(Color::White).add_modifier(modifier)),
+        Span::styled(label.to_string(), Style::default().fg(Color::Gray).add_modifier(modifier)),
     ])
 }
 
-fn draw_menu(frame: &mut Frame, title: &str, items: &[&str], selected: usize) {
+fn draw_menu(frame: &mut Frame, title: &str, items: &[(char, &str)], selected: usize) {
     let popup = centered_rect(50, 40, frame.area());
     let list_items: Vec<ListItem> =
-        items.iter().enumerate().map(|(i, label)| ListItem::new(hotkey_line(label, i == selected))).collect();
+        items.iter().enumerate().map(|(i, (key, label))| ListItem::new(hotkey_line(*key, label, i == selected))).collect();
     let list = List::new(list_items).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
@@ -1165,6 +1276,7 @@ fn draw_help(frame: &mut Frame, binds: &KeyBindings) {
         entry(binds, "Open", Action::Open),
         entry(binds, "Close", Action::Close),
         entry(binds, "Pick up", Action::PickUp),
+        "  (a corpse opens its loot instead of being picked up whole)".to_string(),
         entry(binds, "Wield/hold", Action::OpenWieldMenu),
         entry(binds, "Drop", Action::OpenDropMenu),
         entry(binds, "Examine", Action::OpenExamine),
@@ -1276,6 +1388,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn group_items_counts_equal_items_and_keeps_the_first_index() {
+        let items = [
+            scourge_core::Item::new("Rock"),
+            scourge_core::Item::new("Stick"),
+            scourge_core::Item::new("Rock"),
+            scourge_core::Item::new("Rock"),
+        ];
+        let groups = group_items(items.iter().enumerate());
+        assert_eq!(groups.len(), 2, "3 rocks + 1 stick collapse into 2 groups");
+        assert_eq!(groups[0], (0, 3, &items[0]), "Rock's group keeps index 0, the first Rock seen");
+        assert_eq!(groups[1], (1, 1, &items[1]));
+    }
+
+    #[test]
+    fn group_items_keeps_differently_glyphed_items_of_the_same_name_separate() {
+        // Same name isn't enough to merge - a full item comparison (glyph,
+        // color, melee_damage, ...) matters too, so a reskinned/upgraded
+        // variant never silently merges with the plain version.
+        let items = [scourge_core::Item::new("Rock"), scourge_core::Item::new("Rock").with_melee_damage(14)];
+        let groups = group_items(items.iter().enumerate());
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn item_line_label_only_shows_a_count_above_one() {
+        assert_eq!(item_line_label('a', 1, "Rock"), "a - Rock");
+        assert_eq!(item_line_label('a', 3, "Rock"), "a - 3 Rock");
+    }
+
+    #[test]
     fn color_support_falls_back_correctly() {
         assert_eq!(classify_color_support(Some("truecolor"), Some("xterm-256color")), ColorSupport::TrueColor);
         assert_eq!(classify_color_support(Some("24bit"), None), ColorSupport::TrueColor);
@@ -1295,6 +1437,29 @@ mod tests {
     #[test]
     fn sidebar_width_never_drops_below_the_legibility_floor_even_at_a_tiny_percent() {
         assert!(sidebar_width(40, 10) >= MIN_SIDEBAR_COLUMNS.min(40));
+    }
+
+    #[test]
+    fn recenter_for_zoom_keeps_the_same_world_point_in_the_middle_of_the_view() {
+        // A 40x20 viewport at 1x zoom, cam at (100, 100), viewing world
+        // tiles x=[100,140) y=[100,120) - center is (120, 110).
+        let (cam_x, cam_y) = recenter_for_zoom(100, 100, 1, 4, 40, 20, 1000, 1000);
+        // At 4x zoom the same viewport now spans 160x80 world tiles - for
+        // the same center (120, 110) to land in the middle, the new
+        // top-left corner must be (120 - 80, 110 - 40) = (40, 70).
+        assert_eq!((cam_x, cam_y), (40, 70), "zooming out should recenter, not just keep the old top-left corner");
+
+        // Zooming back in should return to (close to) the original corner.
+        let (back_x, back_y) = recenter_for_zoom(cam_x, cam_y, 4, 1, 40, 20, 1000, 1000);
+        assert_eq!((back_x, back_y), (100, 100));
+    }
+
+    #[test]
+    fn recenter_for_zoom_clamps_to_the_map_edge_instead_of_going_negative() {
+        // Centered near the map's own top-left corner - zooming out would
+        // want a negative top-left corner without the clamp.
+        let (cam_x, cam_y) = recenter_for_zoom(0, 0, 1, 4, 40, 20, 1000, 1000);
+        assert_eq!((cam_x, cam_y), (0, 0));
     }
 
     #[test]

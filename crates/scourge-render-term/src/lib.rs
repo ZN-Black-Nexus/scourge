@@ -19,16 +19,29 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use keybindings::{arrow_action, KeyBindings, DIRECTIONS};
-use scourge_core::{direction_delta, Action, Health, Stats, World};
+use scourge_core::{direction_delta, Action, Health, Item, Stats, World};
 use scourge_render::{Camera, Explored};
 use settings::DisplaySettings;
 use ui::Screen;
 
-/// Terminal size as (width, height), with the last row reserved for the status line.
+/// Raw terminal size as (width, height) - no reservation for a bottom
+/// status line, since the one screen that uses this (the Map screen; see
+/// `map_viewport_size`) keeps its hints in the sidebar rather than a
+/// separate bottom bar, matching every other screen's own layout.
 fn viewport_size() -> (i32, i32) {
-    terminal::size()
-        .map(|(cols, rows)| (cols.max(1) as i32, rows.saturating_sub(1).max(1) as i32))
-        .unwrap_or((80, 24))
+    terminal::size().map(|(cols, rows)| (cols.max(1) as i32, rows.max(1) as i32)).unwrap_or((80, 24))
+}
+
+/// The Map screen's actual map viewport - `viewport_size` with the
+/// sidebar's own width already subtracted, matching what
+/// `map_and_sidebar_areas` gives the renderer (the Map screen keeps its
+/// sidebar visible; see `draw_map_screen`), so the camera math here
+/// agrees with what's actually drawn instead of assuming the full
+/// terminal width.
+fn map_viewport_size(display: &DisplaySettings) -> (i32, i32) {
+    let (total_w, vh) = viewport_size();
+    let vw = total_w - ui::sidebar_width(total_w as u16, display.sidebar_width_percent) as i32;
+    (vw.max(1), vh)
 }
 
 /// Restores the terminal on drop, including on panic, so a crash doesn't leave the user's shell broken.
@@ -183,6 +196,21 @@ fn save_game(world: &World, save_path: &std::path::Path) {
     }
 }
 
+/// What examining tile `(x, y)` should actually open - an NPC (living
+/// creature) takes priority, then a corpse's own loot screen instead of
+/// just describing it, falling back to the plain description popup for
+/// anything else. Shared by both `ExamineDirection` outcomes (a picked
+/// direction, or Wait's key meaning "myself").
+fn examine_target(world: &World, x: i32, y: i32) -> Screen {
+    if let Some(npc_index) = world.npc_index_at(x, y) {
+        Screen::ExamineNpc { npc_index, selected: 0 }
+    } else if world.items_at(x, y).last().is_some_and(Item::is_corpse) {
+        Screen::CorpseLoot { x, y }
+    } else {
+        Screen::Examine { x, y }
+    }
+}
+
 /// Returns false when the game should exit.
 fn handle_key(
     code: KeyCode,
@@ -200,7 +228,7 @@ fn handle_key(
             if code == KeyCode::Esc {
                 *screen = Screen::Pause { selected: 0 };
             } else if code == KeyCode::Char('m') {
-                let (vw, vh) = viewport_size();
+                let (vw, vh) = map_viewport_size(display);
                 let cam_x = (world.player.pos.x - vw / 2).clamp(0, (world.map.width - vw).max(0));
                 let cam_y = (world.player.pos.y - vh / 2).clamp(0, (world.map.height - vh).max(0));
                 *screen = Screen::Map { cam_x, cam_y, zoom: 0 };
@@ -234,6 +262,18 @@ fn handle_key(
                     Action::OpenDropMenu => *screen = Screen::DropSelect,
                     Action::OpenExamine => *screen = Screen::ExamineDirection,
                     Action::OpenEatMenu => *screen = Screen::EatSelect,
+                    // A corpse is a loot container, not something plain
+                    // `g` should just scoop up whole - open its loot
+                    // screen instead of stepping PickUp at all. Anything
+                    // else there (or nothing) picks up normally.
+                    Action::PickUp
+                        if world.pickup_target().is_some_and(|pos| {
+                            world.items_at(pos.x, pos.y).last().is_some_and(Item::is_corpse)
+                        }) =>
+                    {
+                        let pos = world.pickup_target().expect("just checked Some above");
+                        *screen = Screen::CorpseLoot { x: pos.x, y: pos.y };
+                    }
                     _ => {
                         if !world.step(action) {
                             return false;
@@ -257,15 +297,13 @@ fn handle_key(
             } else if let Some(action) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 match action {
                     Action::Wait => {
-                        *screen = Screen::Examine { x: world.player.pos.x, y: world.player.pos.y };
+                        let (x, y) = (world.player.pos.x, world.player.pos.y);
+                        *screen = examine_target(world, x, y);
                     }
                     Action::Move(dir) => {
                         let (dx, dy) = direction_delta(dir);
                         let (x, y) = (world.player.pos.x + dx, world.player.pos.y + dy);
-                        *screen = match world.npc_index_at(x, y) {
-                            Some(npc_index) => Screen::ExamineNpc { npc_index, selected: 0 },
-                            None => Screen::Examine { x, y },
-                        };
+                        *screen = examine_target(world, x, y);
                     }
                     _ => {}
                 }
@@ -294,6 +332,22 @@ fn handle_key(
                     *screen = Screen::Game;
                 }
                 _ => {}
+            }
+        }
+        // Letter-select loot, same convention as WieldSelect/DropSelect -
+        // stays open after taking one item so several can be grabbed in a
+        // row, only '-' (take the whole corpse) or Esc actually leaves.
+        Screen::CorpseLoot { x, y } => {
+            if code == KeyCode::Esc {
+                *screen = Screen::Game;
+            } else if code == KeyCode::Char('-') {
+                world.step(Action::TakeCorpse { x: *x, y: *y });
+                *screen = Screen::Game;
+            } else if let KeyCode::Char(c) = code {
+                if c.is_ascii_lowercase() {
+                    let index = (c as u8 - b'a') as usize;
+                    world.step(Action::TakeCorpseLoot { x: *x, y: *y, item_index: index });
+                }
             }
         }
         Screen::WieldSelect => {
@@ -351,10 +405,21 @@ fn handle_key(
             if code == KeyCode::Esc {
                 *screen = Screen::Game;
             } else if code == KeyCode::Char('z') {
+                let (vw, vh) = map_viewport_size(display);
+                let old_factor = ui::MAP_ZOOM_FACTORS[*zoom];
                 *zoom = (*zoom + 1) % ui::MAP_ZOOM_FACTORS.len();
+                let new_factor = ui::MAP_ZOOM_FACTORS[*zoom];
+                // Recenter on the same world point instead of leaving
+                // cam_x/cam_y (the viewport's top-left corner) untouched -
+                // otherwise zooming out only grows the view's bottom-right
+                // extent, visibly shifting what's on screen.
+                let (new_cam_x, new_cam_y) =
+                    ui::recenter_for_zoom(*cam_x, *cam_y, old_factor, new_factor, vw, vh, world.map.width, world.map.height);
+                *cam_x = new_cam_x;
+                *cam_y = new_cam_y;
             } else if let Some(Action::Move(dir)) = binds.resolve(code).or_else(|| arrow_action(code)) {
                 let (dx, dy) = direction_delta(dir);
-                let (vw, vh) = viewport_size();
+                let (vw, vh) = map_viewport_size(display);
                 // Panning steps by a whole block at a time when zoomed
                 // out, so a single move feels the same "amount of map" at
                 // either zoom level instead of crawling across a now much
@@ -1052,11 +1117,76 @@ mod tests {
             _ => panic!("expected Screen::Map"),
         }
 
+        // Toggling zoom recenters the view (see `map_screen_zoom_toggle_
+        // recenters_instead_of_shifting_the_view`), so don't assert an
+        // exact cam_x here - just that panning afterward still moves by
+        // the new zoom factor.
         handle_key(KeyCode::Char('z'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        let cam_x_after_zoom = match screen {
+            Screen::Map { cam_x, .. } => cam_x,
+            _ => panic!("expected Screen::Map"),
+        };
         handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
         match screen {
-            Screen::Map { cam_x, .. } => assert_eq!(cam_x, 1005, "a whole 4-tile block per press at 4x zoom"),
+            Screen::Map { cam_x, .. } => assert_eq!(cam_x - cam_x_after_zoom, 4, "a whole 4-tile block per press at 4x zoom"),
             _ => panic!("expected Screen::Map"),
         }
+    }
+
+    #[test]
+    fn pickup_near_a_corpse_opens_its_loot_screen_instead_of_grabbing_it() {
+        let mut world = test_world();
+        world.player.pos = scourge_core::Pos { x: 0, y: 0 };
+        world.place_item(0, 0, Item::corpse("Zombie corpse", scourge_core::TileColor::Gray, vec![]));
+        let mut screen = Screen::Game;
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-u");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-u");
+        let save_path = tmp_path("save-u");
+
+        handle_key(KeyCode::Char('g'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::CorpseLoot { x: 0, y: 0 }));
+        assert!(world.player.inventory.is_empty(), "the corpse itself shouldn't be auto-picked-up");
+    }
+
+    #[test]
+    fn examine_direction_toward_a_corpse_opens_its_loot_screen() {
+        let mut world = test_world();
+        world.player.pos = scourge_core::Pos { x: 5, y: 5 };
+        world.place_item(6, 5, Item::corpse("Zombie corpse", scourge_core::TileColor::Gray, vec![]));
+        let mut screen = Screen::ExamineDirection;
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-v");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-v");
+        let save_path = tmp_path("save-v");
+
+        handle_key(KeyCode::Right, &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert!(matches!(screen, Screen::CorpseLoot { x: 6, y: 5 }));
+    }
+
+    #[test]
+    fn corpse_loot_screen_letter_takes_loot_and_dash_takes_the_whole_corpse() {
+        let mut world = test_world();
+        world.place_item(0, 0, Item::corpse("Zombie corpse", scourge_core::TileColor::Gray, vec![Item::new("Rock")]));
+        let mut screen = Screen::CorpseLoot { x: 0, y: 0 };
+        let mut binds = KeyBindings::preset_vi();
+        let visible = world.map.visible_from(world.player.pos, 20);
+        let config_path = tmp_path("binds-w");
+        let mut display = DisplaySettings::default();
+        let settings_path = tmp_path("settings-w");
+        let save_path = tmp_path("save-w");
+
+        handle_key(KeyCode::Char('a'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert_eq!(world.player.inventory, vec![Item::new("Rock")], "took the loot");
+        assert!(matches!(screen, Screen::CorpseLoot { .. }), "stays open to keep looting");
+
+        handle_key(KeyCode::Char('-'), &mut screen, &mut world, &mut binds, &config_path, &mut display, &settings_path, &visible, &save_path);
+        assert_eq!(world.player.inventory.len(), 2, "now also carrying the emptied-out corpse itself");
+        assert!(matches!(screen, Screen::Game), "taking the whole corpse leaves the screen");
+        assert!(world.items_at(0, 0).is_empty());
     }
 }

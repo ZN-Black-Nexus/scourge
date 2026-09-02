@@ -149,7 +149,15 @@ fn scatter_zombies(map: &Map, rng: &mut impl Rng, width: i32, height: i32, npcs:
         if far_enough && (is_open_ground(map.tile(x, y)) || map.tile(x, y) == Some(Tile::Floor)) {
             // Gray for now, matching real DDA's plainest zombie - once
             // there's more than one kind, each gets its own color here.
-            npcs.push(Npc::new("Zombie", Pos { x, y }, Attitude::Hostile).with_glyph('Z', scourge_core::TileColor::Gray));
+            let mut zombie = Npc::new("Zombie", Pos { x, y }, Attitude::Hostile).with_glyph('Z', scourge_core::TileColor::Gray);
+            // Whatever's still in its inventory when it dies becomes its
+            // corpse's loot (see `World::attack_npc`) - a plain chance at
+            // a rock for now, "simple content first" until real loot
+            // tables exist.
+            if rng.gen_bool(0.4) {
+                zombie.inventory.push(Item::new("Rock").with_glyph('*', scourge_core::TileColor::Gray).with_melee_damage(14));
+            }
+            npcs.push(zombie);
         }
     }
 }
