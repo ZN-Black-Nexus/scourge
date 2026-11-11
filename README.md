@@ -1,3 +1,5 @@
+> **Note:** This is the original/first Scourage project.
+
 # Scourge
 
 A terminal survival roguelike, inspired by Cataclysm:DDA, Cataclysm:BN,
